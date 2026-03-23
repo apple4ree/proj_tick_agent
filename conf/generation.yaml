@@ -1,0 +1,21 @@
+# ==============================================
+# 전략 생성 설정 (Generation Plane)
+# ==============================================
+
+generation:
+  backend: template              # template | openai
+  mode: live                     # live | mock | replay
+  latency_ms: 1.0                # 기본 latency — spec holding period 보정용
+  auto_approve: false            # true면 생성 즉시 APPROVED 상태로 전환
+  n_ideas: 3                     # 생성할 아이디어 수
+  idea_index: 0                  # 선택할 아이디어 인덱스
+  static_review_required: true   # false면 review skip (비권장)
+
+  # OpenAI backend 전용
+  openai_model: gpt-4o
+  openai_timeout: 60
+  openai_max_retries: 2
+  replay_path: null              # replay 로그 경로
+
+  # 환경 변수로 API 키를 주입합니다 — YAML에 키를 넣지 마세요
+  # OPENAI_API_KEY 환경 변수 사용

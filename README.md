@@ -4,85 +4,149 @@ LOB(호가창) 틱 데이터 기반 **전략 생성 → 검토 → 컴파일 →
 
 템플릿/규칙 기반으로 전략 사양(Strategy Spec)을 생성하고, 정적 검토를 거친 뒤, 다종목 × 다 latency 조건에서 체계적으로 검증한다.
 
-## 핵심 아키텍처
+## 5-Block 아키텍처
 
-| 구성요소 | 역할 |
-|---------|------|
-| **Strategy Generation** | 전략 사양 생성 — template backend (기본) 또는 OpenAI multi-agent backend |
-| **Strategy Review** | 정적 규칙 기반 사양 검토 (schema, risk, redundancy, feature 검증) |
-| **Strategy Spec** | JSON 기반 전략 명세 (signal, filter, position, exit rules) |
-| **Strategy Compiler** | Spec → 실행 가능한 Strategy 객체로 변환 |
-| **Universe Backtest** | 모든 적용 가능 종목 × 다양한 latency로 백테스트 |
-| **Layer 0~7** | 7계층 백테스팅 파이프라인 |
+본 프로젝트는 내부적으로 Layer 0~7 백테스트 파이프라인을 유지하지만,
+상위 수준에서는 다음 5개 블록으로 이해할 수 있다.
+
+```
+Data ──▶ Strategy ──▶ Execution Planning ──▶ Market Simulation ──▶ Evaluation & Orchestration
+```
+
+| # | Block | 역할 | 대응 코드 |
+|---|-------|------|----------|
+| 1 | **Data** | 원시 틱 데이터 적재, 정제/동기화, MarketState 생성, feature 계산 | `src/data/layer0_data/` |
+| 2 | **Strategy** | 전략 생성, 검토, Spec 저장, 컴파일 (Spec → Strategy 객체) | `src/strategy_block/` |
+| 3 | **Execution Planning** | Signal → Target Position, 주문 수량 계산, slicing/placement/제약 적용 | `src/execution_planning/` |
+| 4 | **Market Simulation** | 체결 시뮬레이션, latency 반영, 수수료/세금/충격 적용, bookkeeping | `src/market_simulation/layer5_simulator/` |
+| 5 | **Evaluation & Orchestration** | PnL 계산, execution quality, 단일/Universe 백테스트, worker orchestration | `src/evaluation_orchestration/` |
+
+> 내부 구현은 Layer 0~7로 세분화되어 있다. 상세는 `PIPELINE.md`를 참조.
 
 ## 프로젝트 구조
 
 ```
 proj_rl_agent/
 ├── src/
-│   ├── strategy_generation/   # 전략 생성 (template / OpenAI multi-agent)
-│   ├── strategy_review/       # 정적 규칙 기반 전략 검토
-│   ├── strategy_specs/        # 전략 사양 스키마
-│   ├── strategy_compiler/     # Spec → Strategy 컴파일러
-│   ├── strategy_registry/     # 전략 저장·관리
-│   ├── strategy/              # Strategy ABC (base.py)
-│   ├── layer0_data/           # 데이터 수집·정제·동기화·피처
-│   ├── layer1_signal/         # 시그널 데이터 타입
-│   ├── layer2_position/       # 포지션 타겟·리스크 관리
-│   ├── layer3_order/          # 주문 타입·델타 계산
-│   ├── layer4_execution/      # 슬라이싱·배치·타이밍
-│   ├── layer5_simulator/      # 체결·수수료·충격·latency
-│   ├── layer6_evaluator/      # PnL·리스크·실행 품질
-│   └── layer7_validation/     # 백테스트 오케스트레이션
+│   ├── data/                    # ── Data Block ──
+│   │   └── layer0_data/         #   데이터 수집·정제·동기화·피처
+│   │
+│   ├── strategy_block/          # ── Strategy Block ──
+│   │   ├── strategy_generation/ #   전략 생성 (template / OpenAI multi-agent)
+│   │   ├── strategy_review/     #   정적 규칙 기반 전략 검토
+│   │   ├── strategy_specs/      #   전략 사양 스키마
+│   │   ├── strategy_compiler/   #   Spec → Strategy 컴파일러
+│   │   ├── strategy_registry/   #   전략 저장·관리 + metadata/promotion
+│   │   └── strategy/            #   Strategy ABC (base.py)
+│   │
+│   ├── execution_planning/      # ── Execution Planning Block ──
+│   │   ├── layer1_signal/       #   시그널 데이터 타입
+│   │   ├── layer2_position/     #   포지션 타겟·리스크 관리
+│   │   ├── layer3_order/        #   주문 타입·델타 계산
+│   │   └── layer4_execution/    #   슬라이싱·배치·타이밍
+│   │
+│   ├── market_simulation/       # ── Market Simulation Block ──
+│   │   └── layer5_simulator/    #   체결·수수료·충격·latency
+│   │
+│   ├── evaluation_orchestration/ # ── Evaluation & Orchestration Block ──
+│   │   ├── layer6_evaluator/    #   PnL·리스크·실행 품질
+│   │   ├── layer7_validation/   #   백테스트 오케스트레이션
+│   │   └── orchestration/       #   비동기 generation/execution orchestration
+│   │
+│   └── utils/config.py          # YAML config loader
+│
+├── conf/                      # YAML 설정 — load_config()가 자동 merge하는 config stack
+│   ├── backtest_core.yaml    # (config stack 미포함) BacktestConfig.from_yaml() 전용
+│   └── profiles/              # 환경별 프로필 — --profile로 지정 시 config stack 위에 merge
 ├── scripts/
-│   ├── generate_strategy.py          # 전략 사양 생성
-│   ├── review_strategy.py            # 전략 사양 검토
-│   ├── backtest.py                   # 단일 종목 백테스트
-│   ├── backtest_strategy_universe.py # Universe 백테스트
-│   ├── summarize_universe_results.py # 결과 집계
-│   ├── collect_data.py               # 데이터 수집
-│   └── visualize.py                  # 시각화
-├── strategies/                # 전략 사양 저장소
-├── conf/                      # YAML 설정
+│   ├── run_generation_worker.sh      # Shell 런처 (권장 진입점)
+│   ├── run_backtest_worker.sh
+│   ├── submit_generation_job.sh
+│   ├── submit_backtest_job.sh
+│   ├── run_local_stack.sh            # 로컬 스택 (두 Worker 동시)
+│   ├── run_generation_worker.py      # Python 실행기 (--profile/--config override 지원)
+│   ├── run_backtest_worker.py
+│   ├── generate_strategy.py          # Generation (--direct or job queue)
+│   ├── submit_backtest_job.py        # Backtest Job submitter
+│   ├── run_generate_review_backtest.sh  # End-to-end launcher
+│   ├── backtest.py                   # 단일 종목 백테스트 (직접 실행)
+│   ├── backtest_strategy_universe.py # Universe 백테스트 (직접 실행)
+│   └── ...
+├── strategies/                # 전략 사양 저장소 (registry)
+├── jobs/                      # File-based job queue
 ├── tests/                     # pytest 테스트
 ├── docs/                      # 문서
 └── archive/                   # 비활성 코드·문서 보관
-    ├── legacy_baselines/      # MicroAlphaStrategy 등
-    ├── legacy_agents/         # llm_agents/ (LLM 기반 Agent)
-    └── docs/                  # 과거 연구 제안서, 모델 명세 등
 ```
 
+## 아키텍처 문서
+
+- 비동기 전략 생성/실행 분리 설계: `ARCHITECTURE.md`
+- 파이프라인 상세 (5-block → Layer 0~7): `PIPELINE.md`
+
 ## 빠른 시작
+
+### End-to-end (가장 쉬운 방법)
+
+생성 → 검토 → 백테스트를 한 번에 실행:
 
 ```bash
 cd /home/dgu/tick/proj_rl_agent
 
-# 1. 전략 생성 (template backend — 기본)
+# Single-symbol
+./scripts/run_generate_review_backtest.sh \
+    --goal "order imbalance alpha" \
+    --symbol 005930 --start-date 20260313
+
+# Universe mode (모든 종목)
+./scripts/run_generate_review_backtest.sh \
+    --goal "order imbalance alpha" \
+    --universe --start-date 20260313
+
+# OpenAI backend 사용
+./scripts/run_generate_review_backtest.sh \
+    --goal "spread mean reversion" \
+    --symbol 005930 --start-date 20260313 \
+    --backend openai --mode mock
+```
+
+`OPENAI_API_KEY` 환경 변수는 `--backend openai --mode live`일 때만 필요하다.
+
+### Worker 기반 실행
+
+```bash
+# 0. 로컬 스택 시작 (generation + backtest worker)
+./scripts/run_local_stack.sh dev
+
+# 1. 전략 생성 Job 제출
+./scripts/submit_generation_job.sh "Order imbalance alpha"
+
+# 2. 백테스트 Job 제출
+./scripts/submit_backtest_job.sh \
+    --strategy imbalance_momentum --version 1.0 \
+    --symbol 005930 --start-date 2026-03-13
+
+# 3. 결과 요약
+PYTHONPATH=src python scripts/summarize_universe_results.py \
+    --results outputs/backtests/universe_results.csv
+```
+
+### 개별 스크립트 직접 실행
+
+```bash
+# 전략 직접 생성
 PYTHONPATH=src python scripts/generate_strategy.py \
-    --goal "Order imbalance alpha"
+    --goal "Order imbalance alpha" --direct
 
-# 1-alt. 전략 생성 (OpenAI multi-agent backend)
-OPENAI_API_KEY=sk-... PYTHONPATH=src python scripts/generate_strategy.py \
-    --goal "Order imbalance alpha" --backend openai
-
-# 2. 전략 검토
-PYTHONPATH=src python scripts/review_strategy.py \
-    strategies/imbalance_momentum_v1.0.json
-
-# 3. 단일 종목 백테스트
+# 단일 종목 백테스트
 PYTHONPATH=src python scripts/backtest.py \
     --spec strategies/imbalance_momentum_v1.0.json \
     --symbol 005930 --start-date 20260313
 
-# 4. Universe 백테스트 (전체 종목 × 기본 latency sweep)
+# Universe 백테스트
 PYTHONPATH=src python scripts/backtest_strategy_universe.py \
     --spec strategies/imbalance_momentum_v1.0.json \
-    --data-dir /home/dgu/tick/open-trading-api/data/realtime/H0STASP0 \
     --start-date 20260313
-
-# 5. 결과 요약
-PYTHONPATH=src python scripts/summarize_universe_results.py \
-    --results outputs/universe_backtest/imbalance_momentum/universe_results.csv
 ```
 
 ## Strategy Spec 형식

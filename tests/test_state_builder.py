@@ -11,7 +11,7 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from layer0_data import MarketStateBuilder
+from data.layer0_data import MarketStateBuilder
 
 
 def _make_lob_df(n_steps: int = 6) -> pd.DataFrame:

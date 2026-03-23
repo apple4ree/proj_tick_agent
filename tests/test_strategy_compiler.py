@@ -13,9 +13,9 @@ for p in (PROJECT_ROOT, SRC_ROOT):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
-from layer0_data.market_state import LOBLevel, LOBSnapshot, MarketState
-from strategy_compiler.compiler import CompiledStrategy, StrategyCompiler
-from strategy_specs.schema import StrategySpec, SignalRule, FilterRule, ExitRule
+from data.layer0_data.market_state import LOBLevel, LOBSnapshot, MarketState
+from strategy_block.strategy_compiler.compiler import CompiledStrategy, StrategyCompiler
+from strategy_block.strategy_specs.schema import StrategySpec, SignalRule, FilterRule, ExitRule
 
 
 # ---------------------------------------------------------------------------

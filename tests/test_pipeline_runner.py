@@ -11,12 +11,12 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from layer0_data.market_state import LOBLevel, LOBSnapshot, MarketState
-from layer1_signal import Signal
-from layer3_order.order_types import OrderSide, OrderStatus, ParentOrder
-from layer5_simulator.micro_events import MicroEventType
-from strategy import Strategy
-from layer7_validation import BacktestConfig, PipelineRunner
+from data.layer0_data.market_state import LOBLevel, LOBSnapshot, MarketState
+from execution_planning.layer1_signal import Signal
+from execution_planning.layer3_order.order_types import OrderSide, OrderStatus, ParentOrder
+from market_simulation.layer5_simulator.micro_events import MicroEventType
+from strategy_block.strategy import Strategy
+from evaluation_orchestration.layer7_validation import BacktestConfig, PipelineRunner
 
 
 def _make_states(n_steps: int = 12) -> list[MarketState]:

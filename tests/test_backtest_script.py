@@ -113,9 +113,9 @@ def test_backtest_script_builds_states_and_runs_pipeline():
         output_dir = Path(output_tmp)
         spec_path = _write_test_spec(output_dir)
 
-        from layer7_validation import BacktestConfig
-        from strategy_specs.schema import StrategySpec
-        from strategy_compiler.compiler import StrategyCompiler
+        from evaluation_orchestration.layer7_validation import BacktestConfig
+        from strategy_block.strategy_specs.schema import StrategySpec
+        from strategy_block.strategy_compiler.compiler import StrategyCompiler
 
         config = BacktestConfig(
             symbol=symbol,
@@ -152,6 +152,84 @@ def test_backtest_script_builds_states_and_runs_pipeline():
         assert saved_summary["n_states"] == 12.0
 
 
+def test_backtest_config_from_cfg():
+    """backtest_config_from_cfg bridges config system to BacktestConfig."""
+    backtest = _load_backtest_module()
+
+    cfg = {
+        "backtest": {
+            "initial_cash": 5e7,
+            "seed": 99,
+            "fee_model": "zero",
+        },
+    }
+    bc = backtest.backtest_config_from_cfg(
+        cfg, symbol="005930", start_date="20260313",
+    )
+    assert bc.symbol == "005930"
+    assert bc.initial_cash == 5e7
+    assert bc.seed == 99
+    assert bc.fee_model == "zero"
+    # defaults still filled
+    assert bc.slicing_algo == "TWAP"
+
+
+def test_backtest_config_from_cfg_with_overrides():
+    """Keyword overrides take priority over config values."""
+    backtest = _load_backtest_module()
+
+    cfg = {"backtest": {"initial_cash": 5e7}}
+    bc = backtest.backtest_config_from_cfg(
+        cfg, symbol="005930", start_date="20260313",
+        initial_cash=2e7,
+    )
+    assert bc.initial_cash == 2e7
+
+
+def test_run_backtest_with_states_yaml_cfg():
+    """yaml_cfg injects paths into run_backtest_with_states."""
+    backtest = _load_backtest_module()
+
+    with TemporaryDirectory() as data_tmp, TemporaryDirectory() as output_tmp:
+        data_dir = Path(data_tmp)
+        symbol = "005930"
+        date = "20260312"
+        day_dir = data_dir / symbol / date
+        day_dir.mkdir(parents=True, exist_ok=True)
+        _make_raw_csv(day_dir / "lob.csv", symbol=symbol, date=date)
+
+        states = backtest.build_states_for_range(
+            data_dir=data_dir, symbol=symbol, start_date=date,
+        )
+
+        output_dir = Path(output_tmp)
+        spec_path = _write_test_spec(output_dir)
+
+        from evaluation_orchestration.layer7_validation import BacktestConfig
+        from strategy_block.strategy_specs.schema import StrategySpec
+        from strategy_block.strategy_compiler.compiler import StrategyCompiler
+
+        config = BacktestConfig(
+            symbol=symbol, start_date="2026-03-12", end_date="2026-03-12",
+            initial_cash=1e8, seed=123, compute_attribution=False,
+            placement_style="aggressive",
+        )
+        strategy = StrategyCompiler.compile(StrategySpec.load(spec_path))
+
+        yaml_cfg = {
+            "paths": {
+                "data_dir": str(data_dir),
+                "outputs_dir": str(output_tmp),
+            },
+        }
+        result = backtest.run_backtest_with_states(
+            config=config, states=states,
+            data_dir=str(data_dir), output_dir=str(output_tmp),
+            strategy=strategy, yaml_cfg=yaml_cfg,
+        )
+        assert result.n_states == 12
+
+
 def test_backtest_script_supports_h0stasp0_date_first_layout():
     backtest = _load_backtest_module()
 
@@ -174,9 +252,9 @@ def test_backtest_script_supports_h0stasp0_date_first_layout():
         output_dir = Path(output_tmp)
         spec_path = _write_test_spec(output_dir)
 
-        from layer7_validation import BacktestConfig
-        from strategy_specs.schema import StrategySpec
-        from strategy_compiler.compiler import StrategyCompiler
+        from evaluation_orchestration.layer7_validation import BacktestConfig
+        from strategy_block.strategy_specs.schema import StrategySpec
+        from strategy_block.strategy_compiler.compiler import StrategyCompiler
 
         config = BacktestConfig(
             symbol=symbol,

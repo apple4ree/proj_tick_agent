@@ -1,0 +1,20 @@
+# ==============================================
+# Smoke 프로필 — 빠른 검증용
+# ==============================================
+
+app:
+  env: smoke
+
+generation:
+  backend: template
+  mode: mock
+  auto_approve: true
+
+backtest:
+  compute_attribution: false
+
+backtest_worker:
+  latencies_ms: [0.0, 100.0]
+
+workers:
+  once: true

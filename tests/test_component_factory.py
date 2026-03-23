@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
-from layer7_validation.backtest_config import (
+from evaluation_orchestration.layer7_validation.backtest_config import (
     FeeConfig,
     ImpactConfig,
     LatencyConfig,
@@ -16,7 +16,7 @@ from layer7_validation.backtest_config import (
     PlacementConfig,
     RiskConfig,
 )
-from layer7_validation.component_factory import ComponentFactory
+from evaluation_orchestration.layer7_validation.component_factory import ComponentFactory
 
 
 class TestBuildFeeModel:
@@ -38,7 +38,7 @@ class TestBuildFeeModel:
     def test_zero_fee(self):
         cfg = FeeConfig(type="zero")
         model = ComponentFactory.build_fee_model(cfg)
-        from layer5_simulator.fee_model import ZeroFeeModel
+        from market_simulation.layer5_simulator.fee_model import ZeroFeeModel
         assert isinstance(model, ZeroFeeModel)
 
 
@@ -60,7 +60,7 @@ class TestBuildImpactModel:
     def test_sqrt(self):
         cfg = ImpactConfig(type="sqrt", sigma=0.02, kappa=0.15)
         model = ComponentFactory.build_impact_model(cfg)
-        from layer5_simulator.impact_model import SquareRootImpact
+        from market_simulation.layer5_simulator.impact_model import SquareRootImpact
         assert isinstance(model, SquareRootImpact)
         assert model.sigma == 0.02
         assert model.kappa == 0.15
@@ -68,7 +68,7 @@ class TestBuildImpactModel:
     def test_zero(self):
         cfg = ImpactConfig(type="zero")
         model = ComponentFactory.build_impact_model(cfg)
-        from layer5_simulator.impact_model import ZeroImpact
+        from market_simulation.layer5_simulator.impact_model import ZeroImpact
         assert isinstance(model, ZeroImpact)
 
 
@@ -108,20 +108,20 @@ class TestBuildMatchingEngine:
     def test_default_config(self):
         cfg = ExchangeConfig()
         engine = ComponentFactory.build_matching_engine(cfg)
-        from layer5_simulator.matching_engine import ExchangeModel, QueueModel
+        from market_simulation.layer5_simulator.matching_engine import ExchangeModel, QueueModel
         assert engine.exchange_model == ExchangeModel.PARTIAL_FILL
         assert engine.queue_model == QueueModel.PROB_QUEUE
 
     def test_no_partial_fill(self):
         cfg = ExchangeConfig(exchange_model="no_partial_fill")
         engine = ComponentFactory.build_matching_engine(cfg)
-        from layer5_simulator.matching_engine import ExchangeModel
+        from market_simulation.layer5_simulator.matching_engine import ExchangeModel
         assert engine.exchange_model == ExchangeModel.NO_PARTIAL_FILL
 
     def test_price_time_queue(self):
         cfg = ExchangeConfig(queue_model="price_time")
         engine = ComponentFactory.build_matching_engine(cfg)
-        from layer5_simulator.matching_engine import QueueModel
+        from market_simulation.layer5_simulator.matching_engine import QueueModel
         assert engine.queue_model == QueueModel.PRICE_TIME
 
     def test_queue_position(self):

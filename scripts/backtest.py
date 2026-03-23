@@ -1,12 +1,26 @@
 """
 계층형 백테스트 진입점.
 
+기본 config stack (자동 로드):
+    app → paths → generation → backtest_base → backtest_worker → workers
+
 사용법:
     cd /home/dgu/tick/proj_rl_agent
 
+    # 기본 실행 (config stack에서 data_dir, fee, latency 등 자동 로드)
     PYTHONPATH=src python scripts/backtest.py \
         --spec strategies/imbalance_momentum_v1.0.json \
         --symbol 005930 --start-date 20260313
+
+    # Profile override (config stack 위에 profile YAML을 merge)
+    PYTHONPATH=src python scripts/backtest.py \
+        --spec strategies/imbalance_momentum_v1.0.json \
+        --symbol 005930 --start-date 20260313 --profile smoke
+
+    # Explicit override (profile 위에 추가 YAML을 merge)
+    PYTHONPATH=src python scripts/backtest.py \
+        --spec strategies/imbalance_momentum_v1.0.json \
+        --symbol 005930 --start-date 20260313 --config custom_override.yaml
 """
 
 from __future__ import annotations
@@ -26,23 +40,18 @@ for path in (PROJECT_ROOT, SRC_ROOT):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from layer0_data import DataIngester, MarketStateBuilder
-from layer7_validation import (
+from data.layer0_data import DataIngester, MarketStateBuilder
+from evaluation_orchestration.layer7_validation import (
     BacktestConfig,
     BacktestResult,
     PipelineRunner,
 )
-from strategy.base import Strategy
-from strategy_compiler.compiler import StrategyCompiler
-from strategy_specs.schema import StrategySpec
+from strategy_block.strategy.base import Strategy
+from strategy_block.strategy_compiler.compiler import StrategyCompiler
+from strategy_block.strategy_specs.schema import StrategySpec
+from utils.config import load_config, get_paths, get_backtest, get_backtest_worker
 
 logger = logging.getLogger(__name__)
-
-# Internal defaults
-_DEFAULT_DATA_DIR = "/home/dgu/tick/open-trading-api/data/realtime/H0STASP0"
-_DEFAULT_RESAMPLE = "1s"
-_DEFAULT_TRADE_LOOKBACK = 100
-_DEFAULT_OUTPUT_DIR = "outputs/backtests"
 
 
 def parse_args() -> argparse.Namespace:
@@ -51,6 +60,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--symbol", required=True, help="KRX symbol code, e.g. 005930")
     parser.add_argument("--start-date", required=True, help="Start date YYYYMMDD")
     parser.add_argument("--end-date", default=None, help="End date YYYYMMDD (default: same as start)")
+    parser.add_argument("--config", default=None,
+                        help="Optional YAML override merged on top of the default config stack "
+                             "(app+paths+generation+backtest_base+backtest_worker+workers+profile)")
+    parser.add_argument("--profile", default=None,
+                        help="Config profile (dev, smoke, prod) — merged after base files, before --config")
     return parser.parse_args()
 
 
@@ -108,21 +122,22 @@ def build_states_for_range(
     return states
 
 
-def build_config(args: argparse.Namespace) -> BacktestConfig:
-    """Build BacktestConfig from CLI args with internal defaults."""
+def build_config(args: argparse.Namespace, bt_cfg: dict | None = None) -> BacktestConfig:
+    """Build BacktestConfig from CLI args + YAML config."""
+    bt = bt_cfg or {}
     end_date_str = args.end_date or args.start_date
     return BacktestConfig(
         symbol=args.symbol,
         start_date=config_date_str(args.start_date),
         end_date=config_date_str(end_date_str),
-        initial_cash=1e8,
-        seed=42,
-        slicing_algo="TWAP",
-        placement_style="spread_adaptive",
-        latency_ms=1.0,
-        fee_model="krx",
-        impact_model="linear",
-        compute_attribution=True,
+        initial_cash=bt.get("initial_cash", 1e8),
+        seed=bt.get("seed", 42),
+        slicing_algo=bt.get("slicing_algo", "TWAP"),
+        placement_style=bt.get("placement_style", "spread_adaptive"),
+        latency_ms=bt.get("latency_ms", 1.0),
+        fee_model=bt.get("fee_model", "krx"),
+        impact_model=bt.get("impact_model", "linear"),
+        compute_attribution=bt.get("compute_attribution", True),
     )
 
 
@@ -132,27 +147,82 @@ def _build_strategy(args: argparse.Namespace) -> Strategy:
     return StrategyCompiler.compile(spec)
 
 
-def run_backtest(args: argparse.Namespace) -> BacktestResult:
-    """Run a backtest from CLI arguments."""
-    config = build_config(args)
+def run_backtest(args: argparse.Namespace, cfg: dict | None = None) -> BacktestResult:
+    """Run a backtest from CLI arguments + config."""
+    cfg = cfg or load_config(config_path=getattr(args, "config", None),
+                              profile=getattr(args, "profile", None))
+    paths = get_paths(cfg)
+    bt = get_backtest(cfg)
+    config = build_config(args, bt)
     strategy = _build_strategy(args)
 
+    data_dir = paths["data_dir"]
+    resample = bt.get("resample", "1s")
+    lookback = bt.get("trade_lookback", 100)
+    output_dir = paths.get("outputs_dir", "outputs") + "/backtests"
+
     states = build_states_for_range(
-        data_dir=_DEFAULT_DATA_DIR,
+        data_dir=data_dir,
         symbol=config.symbol,
         start_date=config.start_date,
         end_date=config.end_date,
-        resample_freq=_DEFAULT_RESAMPLE,
-        trade_lookback=_DEFAULT_TRADE_LOOKBACK,
+        resample_freq=resample,
+        trade_lookback=lookback,
     )
 
     runner = PipelineRunner(
         config=config,
-        data_dir=_DEFAULT_DATA_DIR,
-        output_dir=_DEFAULT_OUTPUT_DIR,
+        data_dir=data_dir,
+        output_dir=output_dir,
         strategy=strategy,
     )
     return runner.run(states)
+
+
+def backtest_config_from_cfg(
+    cfg: dict,
+    *,
+    symbol: str,
+    start_date: str,
+    end_date: str | None = None,
+    **overrides: object,
+) -> BacktestConfig:
+    """Build a :class:`BacktestConfig` from a YAML config dict.
+
+    Bridges the config system (``load_config``) to the typed
+    ``BacktestConfig`` dataclass so that callers don't have to
+    extract individual fields manually.
+
+    매개변수
+    ----------
+    cfg : dict
+        Merged config dict from :func:`utils.config.load_config`.
+    symbol : str
+        KRX symbol code (e.g. ``"005930"``).
+    start_date : str
+        Start date (``YYYYMMDD`` or ``YYYY-MM-DD``).
+    end_date : str, optional
+        End date (defaults to *start_date*).
+    **overrides
+        Additional keyword overrides forwarded to ``BacktestConfig``.
+    """
+    bt = get_backtest(cfg)
+    end_date = end_date or start_date
+    base = {
+        "symbol": symbol,
+        "start_date": config_date_str(start_date),
+        "end_date": config_date_str(end_date),
+        "initial_cash": bt.get("initial_cash", 1e8),
+        "seed": bt.get("seed", 42),
+        "slicing_algo": bt.get("slicing_algo", "TWAP"),
+        "placement_style": bt.get("placement_style", "spread_adaptive"),
+        "latency_ms": bt.get("latency_ms", 1.0),
+        "fee_model": bt.get("fee_model", "krx"),
+        "impact_model": bt.get("impact_model", "linear"),
+        "compute_attribution": bt.get("compute_attribution", True),
+    }
+    base.update(overrides)
+    return BacktestConfig(**base)
 
 
 def run_backtest_with_states(
@@ -161,6 +231,8 @@ def run_backtest_with_states(
     data_dir: str | Path,
     output_dir: str | Path = "outputs/backtests",
     strategy: Strategy | None = None,
+    *,
+    yaml_cfg: dict | None = None,
 ) -> BacktestResult:
     """
     Run a backtest programmatically with pre-built states.
@@ -177,11 +249,23 @@ def run_backtest_with_states(
         Directory for output artifacts.
     strategy : Strategy
         Strategy instance.
+    yaml_cfg : dict, optional
+        Merged config from :func:`utils.config.load_config`.
+        When provided, ``data_dir`` and ``output_dir`` defaults are
+        derived from the ``paths`` section if not explicitly overridden
+        by the caller.
 
     반환값
     -------
     BacktestResult
     """
+    if yaml_cfg is not None:
+        paths = get_paths(yaml_cfg)
+        if data_dir is None:
+            data_dir = paths["data_dir"]
+        if output_dir == "outputs/backtests":
+            output_dir = paths.get("outputs_dir", "outputs") + "/backtests"
+
     runner = PipelineRunner(
         config=config,
         data_dir=data_dir,
@@ -193,42 +277,52 @@ def run_backtest_with_states(
 
 def main() -> None:
     args = parse_args()
+    cfg = load_config(config_path=args.config, profile=args.profile)
+
+    app = cfg.get("app", {})
     logging.basicConfig(
-        level=logging.INFO,
+        level=getattr(logging, app.get("log_level", "INFO")),
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-    config = build_config(args)
+    paths = get_paths(cfg)
+    bt = get_backtest(cfg)
+    config = build_config(args, bt)
+
     symbol = config.symbol
     start_date = config.start_date
     end_date = config.end_date
+    data_dir = paths["data_dir"]
+    resample = bt.get("resample", "1s")
+    lookback = bt.get("trade_lookback", 100)
+    output_dir = paths.get("outputs_dir", "outputs") + "/backtests"
 
     print("=" * 72)
     print(f"Layered Backtest | symbol={symbol} | dates={normalize_date_str(start_date)}..{normalize_date_str(end_date)}")
     print("=" * 72)
 
     states = build_states_for_range(
-        data_dir=_DEFAULT_DATA_DIR,
+        data_dir=data_dir,
         symbol=symbol,
         start_date=start_date,
         end_date=end_date,
-        resample_freq=_DEFAULT_RESAMPLE,
-        trade_lookback=_DEFAULT_TRADE_LOOKBACK,
+        resample_freq=resample,
+        trade_lookback=lookback,
     )
 
     strategy = _build_strategy(args)
 
     runner = PipelineRunner(
         config=config,
-        data_dir=_DEFAULT_DATA_DIR,
-        output_dir=_DEFAULT_OUTPUT_DIR,
+        data_dir=data_dir,
+        output_dir=output_dir,
         strategy=strategy,
     )
     result = runner.run(states)
     summary = result.summary()
 
     print(json.dumps(summary, indent=2, sort_keys=True, default=float))
-    run_dir = Path(_DEFAULT_OUTPUT_DIR) / result.run_id
+    run_dir = Path(output_dir) / result.run_id
     print(f"Saved run artifacts: {run_dir}")
 
 

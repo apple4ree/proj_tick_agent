@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 # Ensure src/ is on sys.path so that internal imports like
-# ``from layer0_data.market_state import …`` resolve correctly even when
+# ``from data.layer0_data.market_state import …`` resolve correctly even when
 # PYTHONPATH is not set externally.
 _SRC_ROOT = str(Path(__file__).resolve().parents[1] / "src")
 if _SRC_ROOT not in sys.path:

@@ -18,8 +18,8 @@ for path in (PROJECT_ROOT, SRC_ROOT):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from strategy_specs.schema import StrategySpec
-from strategy_review import StrategyReviewer, ReviewResult
+from strategy_block.strategy_specs.schema import StrategySpec
+from strategy_block.strategy_review import StrategyReviewer, ReviewResult
 
 
 def parse_args() -> argparse.Namespace:
@@ -56,6 +56,13 @@ def main() -> None:
     spec = StrategySpec.load(args.spec_path)
     result = reviewer.review(spec)
     print_review(spec, result)
+
+    # Machine-friendly output for shell script parsing
+    status = "PASSED" if result.passed else "FAILED"
+    print(f"REVIEW_STATUS={status}")
+
+    if not result.passed:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

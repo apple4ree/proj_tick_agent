@@ -14,11 +14,11 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from layer0_data.market_state import LOBLevel, LOBSnapshot, MarketState
-from layer3_order.order_types import (
+from data.layer0_data.market_state import LOBLevel, LOBSnapshot, MarketState
+from execution_planning.layer3_order.order_types import (
     ChildOrder, OrderSide, OrderStatus, OrderTIF, OrderType, ParentOrder,
 )
-from layer3_order.delta_compute import DeltaComputer
+from execution_planning.layer3_order.delta_compute import DeltaComputer
 
 
 def _make_state(mid: float = 100.0) -> MarketState:
@@ -120,7 +120,7 @@ class TestChildOrder:
 
 class TestDeltaComputer:
     def test_buy_delta(self):
-        from layer2_position.target_builder import TargetPosition
+        from execution_planning.layer2_position.target_builder import TargetPosition
         dc = DeltaComputer()
         ts = pd.Timestamp("2026-03-12 09:30:00")
         target = TargetPosition(timestamp=ts, targets={"TEST": 100}, signal_ref=None)
@@ -128,7 +128,7 @@ class TestDeltaComputer:
         assert deltas == {"TEST": 100}
 
     def test_sell_delta(self):
-        from layer2_position.target_builder import TargetPosition
+        from execution_planning.layer2_position.target_builder import TargetPosition
         dc = DeltaComputer()
         ts = pd.Timestamp("2026-03-12 09:30:00")
         target = TargetPosition(timestamp=ts, targets={"TEST": 0}, signal_ref=None)
@@ -136,7 +136,7 @@ class TestDeltaComputer:
         assert deltas == {"TEST": -50}
 
     def test_no_change(self):
-        from layer2_position.target_builder import TargetPosition
+        from execution_planning.layer2_position.target_builder import TargetPosition
         dc = DeltaComputer()
         ts = pd.Timestamp("2026-03-12 09:30:00")
         target = TargetPosition(timestamp=ts, targets={"TEST": 100}, signal_ref=None)

@@ -11,6 +11,28 @@
 2. **Compiler가 Spec을 Strategy 객체로 변환한다** — 기존 백테스트 엔진과 연결
 3. **모든 적용 가능 종목에 백테스트한다** — 단일 종목 결과로 결론 내지 않음
 4. **Latency는 기본 실험 축이다** — 0ms, 50ms, 100ms, 500ms, 1000ms
+5. **전략 생성과 실행은 분리될 수 있어야 한다** — registry와 orchestration layer를 통해 비동기 연결
+
+---
+
+## 5-Block 아키텍처
+
+본 프로젝트는 내부적으로 Layer 0~7 백테스트 파이프라인을 유지하지만,
+상위 수준에서는 다음 5개 블록으로 이해할 수 있다.
+
+```
+Data ──▶ Strategy ──▶ Execution Planning ──▶ Market Simulation ──▶ Evaluation & Orchestration
+```
+
+| # | Block | 역할 | 대응 코드 |
+|---|-------|------|----------|
+| 1 | **Data** | 원시 틱 데이터 적재, 정제/동기화, MarketState 생성, feature 계산 | `src/data/layer0_data/` |
+| 2 | **Strategy** | 전략 생성, 검토, Spec 저장, 컴파일 (Spec → Strategy 객체) | `src/strategy_block/` |
+| 3 | **Execution Planning** | Signal → Target Position, 주문 수량 계산, slicing/placement/제약 적용 | `src/execution_planning/` |
+| 4 | **Market Simulation** | 체결 시뮬레이션, latency 반영, 수수료/세금/충격 적용, bookkeeping | `src/market_simulation/layer5_simulator/` |
+| 5 | **Evaluation & Orchestration** | PnL 계산, execution quality, 단일/Universe 백테스트, worker orchestration | `src/evaluation_orchestration/` |
+
+> 내부 구현은 Layer 0~7로 세분화되어 있다. 상세는 `PIPELINE.md`를 참조.
 
 ---
 
@@ -19,61 +41,85 @@
 ```
 proj_rl_agent/
 ├── src/
-│   ├── strategy_generation/   # 전략 생성 (template / OpenAI multi-agent)
-│   │   ├── templates.py       # 5개 전략 템플릿 + 키워드 매칭
-│   │   ├── generator.py       # StrategyGenerator (backend 선택 + fallback)
-│   │   ├── pipeline.py        # MultiAgentPipeline (4-agent 오케스트레이션)
-│   │   ├── agents.py          # Researcher/FactorDesigner/RiskDesigner/LLMReviewer
-│   │   ├── agent_schemas.py   # Pydantic 스키마 (IdeaBrief, SignalDraft, RiskDraft 등)
-│   │   ├── assembler.py       # Agent 출력 → StrategySpec 결정론적 변환
-│   │   └── openai_client.py   # OpenAI API 클라이언트 (live/replay/mock)
+│   ├── data/                    # ── Data Block ──
+│   │   └── layer0_data/         #   데이터 수집·정제·동기화·피처
 │   │
-│   ├── strategy_review/       # 정적 규칙 기반 전략 검토
-│   │   └── reviewer.py        # StrategyReviewer (7개 검증 카테고리)
+│   ├── strategy_block/          # ── Strategy Block ──
+│   │   ├── strategy_generation/ #   전략 생성 (template / OpenAI multi-agent)
+│   │   │   ├── templates.py     #     5개 전략 템플릿 + 키워드 매칭
+│   │   │   ├── generator.py     #     StrategyGenerator (backend 선택 + fallback)
+│   │   │   ├── pipeline.py      #     MultiAgentPipeline (4-agent 오케스트레이션)
+│   │   │   ├── agents.py        #     Researcher/FactorDesigner/RiskDesigner/LLMReviewer
+│   │   │   ├── agent_schemas.py #     Pydantic 스키마
+│   │   │   ├── assembler.py     #     Agent 출력 → StrategySpec 결정론적 변환
+│   │   │   └── openai_client.py #     OpenAI API 클라이언트 (live/replay/mock)
+│   │   ├── strategy_review/     #   정적 규칙 기반 전략 검토
+│   │   ├── strategy_specs/      #   전략 사양 스키마
+│   │   ├── strategy_compiler/   #   Spec → Strategy 컴파일러
+│   │   ├── strategy_registry/   #   전략 저장·관리
+│   │   └── strategy/            #   Strategy ABC (base.py)
 │   │
-│   ├── strategy_specs/        # 전략 사양 스키마
-│   │   └── schema.py          # StrategySpec, SignalRule, FilterRule, PositionRule, ExitRule
+│   ├── execution_planning/      # ── Execution Planning Block ──
+│   │   ├── layer1_signal/       #   시그널 데이터 타입 (Signal dataclass)
+│   │   ├── layer2_position/     #   포지션 타겟·리스크 관리
+│   │   ├── layer3_order/        #   주문 타입·델타 계산
+│   │   └── layer4_execution/    #   슬라이싱·배치·타이밍
 │   │
-│   ├── strategy_compiler/     # Spec → Strategy 컴파일러
-│   │   └── compiler.py        # StrategyCompiler, CompiledStrategy
+│   ├── market_simulation/       # ── Market Simulation Block ──
+│   │   └── layer5_simulator/    #   체결·수수료·충격·latency
 │   │
-│   ├── strategy_registry/     # 전략 저장·관리
-│   │   └── registry.py        # StrategyRegistry (파일 기반)
+│   ├── evaluation_orchestration/ # ── Evaluation & Orchestration Block ──
+│   │   ├── layer6_evaluator/    #   PnL·리스크·실행 품질
+│   │   ├── layer7_validation/   #   백테스트 오케스트레이션
+│   │   └── orchestration/       #   비동기 generation/execution orchestration
+│   │       ├── models.py        #     Job, JobType, JobStatus
+│   │       ├── file_queue.py    #     FileQueue (atomic rename)
+│   │       ├── manager.py       #     OrchestrationManager
+│   │       ├── generation_worker.py # GenerationWorker
+│   │       └── backtest_worker.py   # BacktestWorker
 │   │
-│   ├── strategy/              # Strategy 인터페이스
-│   │   └── base.py            # Strategy ABC
-│   │
-│   ├── layer0_data/           # 데이터 수집·정제·동기화·피처
-│   ├── layer1_signal/         # 시그널 데이터 타입 (Signal dataclass)
-│   ├── layer2_position/       # 포지션 타겟·리스크 관리
-│   ├── layer3_order/          # 주문 타입·델타 계산
-│   ├── layer4_execution/      # 슬라이싱·배치·타이밍
-│   ├── layer5_simulator/      # 체결·수수료·충격·latency
-│   ├── layer6_evaluator/      # PnL·리스크·실행 품질
-│   └── layer7_validation/     # 백테스트 오케스트레이션
+│   └── utils/
+│       └── config.py            # YAML config loader (merge, profile, env)
 │
 ├── scripts/
-│   ├── generate_strategy.py          # 전략 사양 생성
-│   ├── review_strategy.py            # 전략 사양 검토
-│   ├── backtest.py                   # 단일 종목 백테스트
-│   ├── backtest_strategy_universe.py # Universe 백테스트
+│   ├── run_generation_worker.sh      # Shell 런처 (권장 진입점)
+│   ├── run_backtest_worker.sh
+│   ├── submit_generation_job.sh
+│   ├── submit_backtest_job.sh
+│   ├── run_local_stack.sh            # 로컬 스택 (두 Worker 동시)
+│   ├── run_generation_worker.py      # Python 실행기 (--config 기반)
+│   ├── run_backtest_worker.py
+│   ├── generate_strategy.py          # Generation (--direct or job queue)
+│   ├── submit_backtest_job.py        # Backtest Job submitter
+│   ├── run_generate_review_backtest.sh  # End-to-end launcher
+│   ├── backtest.py                   # 단일 종목 백테스트 (직접 실행)
+│   ├── backtest_strategy_universe.py # Universe 백테스트 (직접 실행)
 │   ├── summarize_universe_results.py # 결과 집계
 │   ├── collect_data.py               # 데이터 수집
 │   └── visualize.py                  # 시각화
 │
-├── strategies/                # 생성된 전략 사양 저장소
-├── conf/                      # YAML 설정
+├── conf/                      # YAML 설정 — load_config()가 자동 merge하는 config stack
+│   ├── backtest_core.yaml    # (config stack 미포함) BacktestConfig.from_yaml() 전용
+│   └── profiles/              # 환경별 프로필 — --profile로 지정 시 config stack 위에 merge
+├── strategies/                # 생성된 전략 사양 저장소 (registry)
+├── jobs/                      # File-based job queue
 ├── tests/                     # pytest 테스트
 └── docs/                      # 문서
 ```
 
 ---
 
+## 아키텍처 문서
+
+- 5-block 아키텍처 및 세부 설계: `ARCHITECTURE.md`
+- 파이프라인 상세 (5-block → Layer 0~7): `PIPELINE.md`
+- generation plane와 execution plane 분리 원칙, spec lifecycle, registry/job queue 설계 포함
+
 ## 전략 생성 → 검토 → 컴파일
 
 ### StrategyGenerator
 
-`src/strategy_generation/` — 두 가지 backend를 병행 지원하는 전략 사양 생성기.
+`src/strategy_block/strategy_generation/` — 두 가지 backend를 병행 지원하는 전략 사양 생성기.
 
 **Template backend** (기본, `--backend template`):
 - `--goal` 키워드에서 관련 템플릿 자동 선택 (가장 적합한 1개 생성)
@@ -88,12 +134,12 @@ proj_rl_agent/
 
 공통:
 - Static reviewer는 양쪽 backend 모두 필수 hard gate
-- 백테스트 코어(Layer 0~7)는 backend에 무관하게 동일
+- 백테스트 엔진(Execution Planning → Market Simulation → Evaluation)은 backend에 무관하게 동일
 - 생성된 Spec은 `StrategyRegistry`에 저장, trace JSON도 별도 저장
 
 ### StrategyReviewer
 
-`src/strategy_review/` — 정적 규칙 기반 검토기.
+`src/strategy_block/strategy_review/` — 정적 규칙 기반 검토기.
 
 7개 검증 카테고리:
 | 카테고리 | 검토 내용 |
@@ -108,7 +154,7 @@ proj_rl_agent/
 
 ### StrategyCompiler
 
-`src/strategy_compiler/` — Spec → CompiledStrategy 변환.
+`src/strategy_block/strategy_compiler/` — Spec → CompiledStrategy 변환.
 - 20+ 내장 피처 (LOB, trade, feature pipeline)
 - 7개 비교 연산자 (`>`, `<`, `>=`, `<=`, `==`, `cross_above`, `cross_below`)
 - 5개 exit 타입 (stop_loss, take_profit, trailing_stop, time_exit, signal_reversal)
@@ -164,18 +210,23 @@ proj_rl_agent/
 
 ---
 
-## 7계층 백테스팅 파이프라인
+## 내부 구현: Layer 0~7
+
+5-block 아키텍처의 각 블록은 내부적으로 Layer 0~7로 세분화되어 있다.
+이 계층 구조는 구현 수준의 모듈 분리이며, 상위 블록 관점에서 이해한 뒤 필요 시 참조한다.
 
 ```
-Layer 0: Data       — 수집, 정제, 동기화, 피처
-Layer 1: Signal     — 시그널 인터페이스
-Layer 2: Position   — 포지션 타겟, 리스크
-Layer 3: Order      — 주문 타입, 델타
-Layer 4: Execution  — 슬라이싱, 배치
-Layer 5: Simulator  — 체결, 수수료, 충격, latency
-Layer 6: Evaluator  — PnL, 리스크, 실행 품질
-Layer 7: Validation — 백테스트 오케스트레이션
+Block 1 (Data)                 → Layer 0: Data       — 수집, 정제, 동기화, 피처
+Block 3 (Execution Planning)   → Layer 1: Signal     — 시그널 인터페이스
+                                 Layer 2: Position   — 포지션 타겟, 리스크
+                                 Layer 3: Order      — 주문 타입, 델타
+                                 Layer 4: Execution  — 슬라이싱, 배치
+Block 4 (Market Simulation)    → Layer 5: Simulator  — 체결, 수수료, 충격, latency
+Block 5 (Evaluation)           → Layer 6: Evaluator  — PnL, 리스크, 실행 품질
+                                 Layer 7: Validation — 백테스트 오케스트레이션
 ```
+
+> 각 Layer의 모듈별 상세는 `PIPELINE.md`를 참조.
 
 ---
 

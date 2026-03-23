@@ -7,10 +7,15 @@
 
 ## 실험 워크플로우
 
-### 1. 전략 생성
+### 1. 전략 생성 (Job 제출)
 
 ```bash
 cd /home/dgu/tick/proj_rl_agent
+
+# Shell 런처 (권장)
+./scripts/submit_generation_job.sh "Order imbalance alpha"
+
+# 또는 직접 Python
 PYTHONPATH=src python scripts/generate_strategy.py \
     --goal "Order imbalance alpha"
 ```
@@ -25,6 +30,12 @@ PYTHONPATH=src python scripts/review_strategy.py \
 ### 3. 단일 종목 백테스트
 
 ```bash
+# Job 제출 (권장)
+./scripts/submit_backtest_job.sh \
+    --strategy imbalance_momentum --version 1.0 \
+    --symbol 005930 --start-date 2026-03-13
+
+# 또는 직접 실행
 PYTHONPATH=src python scripts/backtest.py \
     --spec strategies/imbalance_momentum_v1.0.json \
     --symbol 005930 --start-date 20260313
@@ -50,7 +61,8 @@ PYTHONPATH=src python scripts/summarize_universe_results.py \
 
 ## Baseline 설정 참고
 
-`conf/baseline.yaml`에 백테스트 기본 파라미터가 정의되어 있습니다:
+`conf/backtest_base.yaml`에 백테스트 공통 기본 파라미터가 정의되어 있습니다
+(config stack의 일부로 자동 로드됨):
 
 | 카테고리 | 파라미터 | 값 | 근거 |
 |----------|----------|-----|------|

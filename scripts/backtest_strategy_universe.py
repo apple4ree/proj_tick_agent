@@ -4,13 +4,28 @@ Universe 백테스트 실행기.
 하나의 전략 사양을 모든 적용 가능한 종목에 대해 백테스트하고,
 latency를 실험 변인으로 포함합니다.
 
+기본 config stack (자동 로드):
+    app → paths → generation → backtest_base → backtest_worker → workers
+    (latency sweep 등 worker 전용 설정은 backtest_worker.yaml에서 로드)
+
 사용법:
     cd /home/dgu/tick/proj_rl_agent
 
+    # 기본 실행 (data-dir, latency sweep 등은 config stack에서 로드)
     PYTHONPATH=src python scripts/backtest_strategy_universe.py \
         --spec strategies/imbalance_momentum_v1.0.json \
-        --data-dir /home/dgu/tick/open-trading-api/data/realtime/H0STASP0 \
         --start-date 20260313
+
+    # data-dir CLI override (config stack의 paths.data_dir 대신 사용)
+    PYTHONPATH=src python scripts/backtest_strategy_universe.py \
+        --spec strategies/imbalance_momentum_v1.0.json \
+        --data-dir /path/to/H0STASP0 \
+        --start-date 20260313
+
+    # Profile override (config stack 위에 profile YAML을 merge)
+    PYTHONPATH=src python scripts/backtest_strategy_universe.py \
+        --spec strategies/imbalance_momentum_v1.0.json \
+        --start-date 20260313 --profile smoke
 """
 from __future__ import annotations
 
@@ -31,28 +46,27 @@ for path in (PROJECT_ROOT, SRC_ROOT):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from layer0_data import DataIngester, MarketStateBuilder
-from layer7_validation import BacktestConfig, PipelineRunner
-from layer7_validation.backtest_config import LatencyConfig
-from strategy_specs.schema import StrategySpec
-from strategy_compiler.compiler import StrategyCompiler
+from data.layer0_data import DataIngester, MarketStateBuilder
+from evaluation_orchestration.layer7_validation import BacktestConfig, PipelineRunner
+from evaluation_orchestration.layer7_validation.backtest_config import LatencyConfig
+from strategy_block.strategy_specs.schema import StrategySpec
+from strategy_block.strategy_compiler.compiler import StrategyCompiler
+from utils.config import load_config, get_paths, get_backtest, get_backtest_worker
 
 logger = logging.getLogger(__name__)
-
-# Internal defaults
-_DEFAULT_LATENCIES = [0.0, 50.0, 100.0, 500.0, 1000.0]
-_DEFAULT_OUTPUT_DIR = "outputs/universe_backtest/"
-_DEFAULT_RESAMPLE = "1s"
-_DEFAULT_INITIAL_CASH = 1e8
-_DEFAULT_SEED = 42
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run universe backtest for a strategy spec")
     parser.add_argument("--spec", required=True, help="Path to strategy spec JSON")
-    parser.add_argument("--data-dir", required=True, help="H0STASP0 data root directory")
+    parser.add_argument("--data-dir", default=None, help="H0STASP0 data root (default: from config)")
     parser.add_argument("--start-date", required=True, help="Start date YYYYMMDD")
     parser.add_argument("--end-date", default=None, help="End date YYYYMMDD (default: same as start)")
+    parser.add_argument("--config", default=None,
+                        help="Optional YAML override merged on top of the default config stack "
+                             "(app+paths+generation+backtest_base+backtest_worker+workers+profile)")
+    parser.add_argument("--profile", default=None,
+                        help="Config profile (dev, smoke, prod) — merged after base files, before --config")
     return parser.parse_args()
 
 
@@ -252,10 +266,23 @@ def run_single_backtest(
 
 def main() -> None:
     args = parse_args()
+    cfg = load_config(config_path=args.config, profile=args.profile)
+
+    app = cfg.get("app", {})
     logging.basicConfig(
-        level=logging.INFO,
+        level=getattr(logging, app.get("log_level", "INFO")),
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+
+    paths = get_paths(cfg)
+    bt = get_backtest(cfg)
+    bt_worker = get_backtest_worker(cfg)
+    data_dir = args.data_dir or paths["data_dir"]
+    latencies = bt_worker.get("latencies_ms", [0.0, 50.0, 100.0, 500.0, 1000.0])
+    initial_cash = bt.get("initial_cash", 1e8)
+    seed = bt.get("seed", 42)
+    resample = bt.get("resample", "1s")
+    base_output_dir = paths.get("outputs_dir", "outputs") + "/universe_backtest"
 
     # Load and compile strategy
     spec = StrategySpec.load(args.spec)
@@ -268,8 +295,7 @@ def main() -> None:
     print(f"Description: {spec.description}")
 
     # Discover all symbols
-    symbols = discover_symbols(args.data_dir, args.start_date, args.end_date)
-    latencies = _DEFAULT_LATENCIES
+    symbols = discover_symbols(data_dir, args.start_date, args.end_date)
 
     start_date_fmt = f"{args.start_date[:4]}-{args.start_date[4:6]}-{args.start_date[6:8]}" \
         if len(args.start_date) == 8 else args.start_date
@@ -281,7 +307,7 @@ def main() -> None:
     print(f"Latencies: {latencies} ms")
     print(f"Date range: {start_date_fmt} ~ {end_date_fmt}")
 
-    output_dir = Path(_DEFAULT_OUTPUT_DIR) / spec.name
+    output_dir = Path(base_output_dir) / spec.name
     output_dir.mkdir(parents=True, exist_ok=True)
 
     all_results: list[dict] = []
@@ -297,8 +323,8 @@ def main() -> None:
         t_build_0 = time.monotonic()
         try:
             states = build_states(
-                args.data_dir, symbol, args.start_date, args.end_date,
-                _DEFAULT_RESAMPLE, None,
+                data_dir, symbol, args.start_date, args.end_date,
+                resample, None,
             )
         except Exception as e:
             logger.warning("Failed to build states for %s: %s", symbol, e)
@@ -327,9 +353,9 @@ def main() -> None:
 
             run_result = run_single_backtest(
                 strategy_cls=strategy_factory,
-                symbol=symbol, states=states, data_dir=args.data_dir,
-                latency_ms=lat, initial_cash=_DEFAULT_INITIAL_CASH,
-                seed=_DEFAULT_SEED, compute_attribution=True,
+                symbol=symbol, states=states, data_dir=data_dir,
+                latency_ms=lat, initial_cash=initial_cash,
+                seed=seed, compute_attribution=bt.get("compute_attribution", True),
                 start_date=start_date_fmt, end_date=end_date_fmt,
                 summary_only=True,
                 run_output_dir=run_dir,

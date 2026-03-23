@@ -1,0 +1,8 @@
+# ==============================================
+# Worker 동작 설정
+# ==============================================
+
+workers:
+  generation_poll_interval: 5.0   # 초 — generation worker 폴링 간격
+  backtest_poll_interval: 5.0     # 초 — backtest worker 폴링 간격
+  once: false                     # true면 한 번 실행 후 종료

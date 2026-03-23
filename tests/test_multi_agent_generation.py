@@ -16,11 +16,12 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from strategy_generation.agent_schemas import (
+from strategy_block.strategy_generation.agent_schemas import (
     ExitRuleDraft,
     FilterRuleDraft,
     IdeaBrief,
     IdeaBriefList,
+    KNOWN_FEATURES_LIST,
     KNOWN_FEATURES_SET,
     PositionRuleDraft,
     ReviewDecision,
@@ -28,19 +29,23 @@ from strategy_generation.agent_schemas import (
     RiskDraft,
     SignalDraft,
     SignalRuleDraft,
+    VALID_EXIT_TYPES,
+    VALID_OPERATORS,
+    VALID_SIZING_MODES,
 )
-from strategy_generation.assembler import assemble_spec
-from strategy_generation.agents import (
+from strategy_block.strategy_generation.prompt_loader import load_agent_prompt
+from strategy_block.strategy_generation.assembler import assemble_spec
+from strategy_block.strategy_generation.agents import (
     FactorDesignerAgent,
     LLMReviewerAgent,
     ResearcherAgent,
     RiskDesignerAgent,
 )
-from strategy_generation.generator import StrategyGenerator
-from strategy_generation.openai_client import OpenAIStrategyGenClient
-from strategy_generation.pipeline import MultiAgentPipeline
-from strategy_specs.schema import StrategySpec
-from strategy_review.reviewer import StrategyReviewer
+from strategy_block.strategy_generation.generator import StrategyGenerator, StaticReviewError
+from strategy_block.strategy_generation.openai_client import OpenAIStrategyGenClient
+from strategy_block.strategy_generation.pipeline import MultiAgentPipeline
+from strategy_block.strategy_specs.schema import StrategySpec
+from strategy_block.strategy_review.reviewer import StrategyReviewer
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────
@@ -87,6 +92,56 @@ def sample_risk_draft() -> RiskDraft:
         ],
         latency_notes="1ms latency",
     )
+
+
+# ── 0. Prompt Loader Tests ───────────────────────────────────────────
+
+_TEST_CONTEXT: dict[str, str] = {
+    "FEATURES_BLOCK": (
+        "ALLOWED FEATURES (use ONLY these):\n"
+        + "\n".join(f"  - {f}" for f in KNOWN_FEATURES_LIST)
+    ),
+    "OPERATORS_BLOCK": f"ALLOWED OPERATORS: {', '.join(VALID_OPERATORS)}",
+    "SIZING_BLOCK": f"ALLOWED SIZING MODES: {', '.join(VALID_SIZING_MODES)}",
+    "EXIT_TYPES_BLOCK": f"ALLOWED EXIT TYPES: {', '.join(VALID_EXIT_TYPES)}",
+}
+
+
+class TestPromptLoader:
+
+    @pytest.mark.parametrize("name", ["researcher", "factor_designer", "risk_designer", "reviewer"])
+    def test_prompt_file_loads(self, name: str):
+        """Each agent prompt .md file loads without error."""
+        prompt = load_agent_prompt(name, _TEST_CONTEXT)
+        assert isinstance(prompt, str)
+        assert len(prompt) > 50  # non-trivial content
+
+    @pytest.mark.parametrize("name", ["researcher", "factor_designer", "risk_designer", "reviewer"])
+    def test_placeholders_fully_substituted(self, name: str):
+        """No raw {PLACEHOLDER} tokens remain after substitution."""
+        prompt = load_agent_prompt(name, _TEST_CONTEXT)
+        for key in _TEST_CONTEXT:
+            assert f"{{{key}}}" not in prompt, f"Unsubstituted placeholder {{{key}}} in {name}.md"
+
+    def test_researcher_contains_features(self):
+        prompt = load_agent_prompt("researcher", _TEST_CONTEXT)
+        assert "ALLOWED FEATURES" in prompt
+        assert "order_imbalance" in prompt
+
+    def test_factor_designer_contains_operators(self):
+        prompt = load_agent_prompt("factor_designer", _TEST_CONTEXT)
+        assert "ALLOWED OPERATORS" in prompt
+        assert ">" in prompt
+
+    def test_risk_designer_contains_sizing_and_exits(self):
+        prompt = load_agent_prompt("risk_designer", _TEST_CONTEXT)
+        assert "ALLOWED SIZING MODES" in prompt
+        assert "ALLOWED EXIT TYPES" in prompt
+        assert "stop_loss" in prompt
+
+    def test_missing_prompt_raises(self):
+        with pytest.raises(FileNotFoundError):
+            load_agent_prompt("nonexistent_agent", _TEST_CONTEXT)
 
 
 # ── 1. Schema Parse Tests ────────────────────────────────────────────
@@ -344,7 +399,7 @@ class TestGeneratorBackend:
             assert isinstance(spec, StrategySpec)
 
 
-# ── 6. Static Reviewer Fail → Fallback Tests ────────────────────────
+# ── 6. Static Reviewer Hard Gate Tests ───────────────────────────────
 
 class TestStaticReviewerGate:
 
@@ -354,6 +409,99 @@ class TestStaticReviewerGate:
         assert "static_review" in trace
         assert "passed" in trace["static_review"]
 
+    def test_pipeline_raises_on_static_review_failure(self):
+        """Pipeline must raise when static review fails (hard gate)."""
+        pipeline = MultiAgentPipeline(mode="mock")
+
+        # Force static review to fail
+        fake_result = MagicMock()
+        fake_result.passed = False
+        fake_result.issues = [MagicMock(severity="error", description="forced fail")]
+        fake_result.to_dict.return_value = {"passed": False, "issues": []}
+
+        with patch.object(pipeline._static_reviewer, "review", return_value=fake_result):
+            with pytest.raises(ValueError, match="failed static review"):
+                pipeline.generate(research_goal="Test")
+
+    def test_generator_template_raises_static_review_error(self):
+        """Template backend must raise StaticReviewError when review fails."""
+        gen = StrategyGenerator(latency_ms=1.0, backend="template")
+
+        fake_result = MagicMock()
+        fake_result.passed = False
+        fake_result.issues = [MagicMock(severity="error", description="forced fail")]
+        fake_result.to_dict.return_value = {"passed": False, "issues": []}
+
+        with patch.object(gen._reviewer, "review", return_value=fake_result):
+            with pytest.raises(StaticReviewError, match="failed static review"):
+                gen.generate(research_goal="Test")
+
+    def test_generator_openai_fallback_to_template_on_pipeline_fail(self):
+        """When openai pipeline raises, generator falls back to template."""
+        gen = StrategyGenerator(latency_ms=1.0, backend="openai", mode="mock")
+
+        # Force the pipeline to raise, template should succeed
+        if gen._multi_agent is not None:
+            with patch.object(
+                gen._multi_agent, "generate",
+                side_effect=ValueError("pipeline failed"),
+            ):
+                spec, trace = gen.generate(research_goal="Order imbalance")
+                assert isinstance(spec, StrategySpec)
+                assert trace["fallback_used"] is True
+                assert trace["generation_outcome"] == "fallback_success"
+        else:
+            # No pipeline, template is used directly
+            spec, trace = gen.generate(research_goal="Order imbalance")
+            assert isinstance(spec, StrategySpec)
+
+    def test_generator_both_backends_fail_raises(self):
+        """When both openai and template fail review, StaticReviewError propagates."""
+        gen = StrategyGenerator(latency_ms=1.0, backend="openai", mode="mock")
+
+        fake_result = MagicMock()
+        fake_result.passed = False
+        fake_result.issues = [MagicMock(severity="error", description="forced fail")]
+        fake_result.to_dict.return_value = {"passed": False, "issues": []}
+
+        if gen._multi_agent is not None:
+            with patch.object(
+                gen._multi_agent, "generate",
+                side_effect=ValueError("pipeline failed"),
+            ):
+                with patch.object(gen._reviewer, "review", return_value=fake_result):
+                    with pytest.raises(StaticReviewError):
+                        gen.generate(research_goal="Test")
+        else:
+            # No pipeline; template-only path
+            with patch.object(gen._reviewer, "review", return_value=fake_result):
+                with pytest.raises(StaticReviewError):
+                    gen.generate(research_goal="Test")
+
+    def test_static_review_error_has_trace(self):
+        """StaticReviewError raised from template should carry a trace dict."""
+        gen = StrategyGenerator(latency_ms=1.0, backend="template")
+
+        fake_result = MagicMock()
+        fake_result.passed = False
+        fake_result.issues = [MagicMock(severity="error", description="forced")]
+        fake_result.to_dict.return_value = {"passed": False, "issues": []}
+
+        with patch.object(gen._reviewer, "review", return_value=fake_result):
+            with pytest.raises(StaticReviewError) as exc_info:
+                gen.generate(research_goal="Test")
+
+        assert exc_info.value.trace is not None
+        assert exc_info.value.trace["generation_outcome"] == "failed"
+        assert exc_info.value.trace["static_review_passed"] is False
+
+    def test_generation_outcome_field_on_success(self):
+        """Successful generation trace must have generation_outcome='success'."""
+        gen = StrategyGenerator(latency_ms=1.0, backend="template")
+        spec, trace = gen.generate(research_goal="Order imbalance")
+        assert trace["generation_outcome"] == "success"
+        assert trace["static_review_passed"] is True
+
 
 # ── 7. Compiler Smoke Test ───────────────────────────────────────────
 
@@ -362,14 +510,14 @@ class TestCompilerSmoke:
     def test_mock_generated_spec_compiles(self):
         pipeline = MultiAgentPipeline(mode="mock")
         spec, _ = pipeline.generate(research_goal="Order imbalance")
-        from strategy_compiler.compiler import StrategyCompiler
+        from strategy_block.strategy_compiler.compiler import StrategyCompiler
         strategy = StrategyCompiler.compile(spec)
         assert strategy is not None
 
     def test_template_generated_spec_compiles(self):
         gen = StrategyGenerator(latency_ms=1.0, backend="template")
         spec, _ = gen.generate(research_goal="Order imbalance")
-        from strategy_compiler.compiler import StrategyCompiler
+        from strategy_block.strategy_compiler.compiler import StrategyCompiler
         strategy = StrategyCompiler.compile(spec)
         assert strategy is not None
 

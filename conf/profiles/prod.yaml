@@ -1,0 +1,23 @@
+# ==============================================
+# Prod 프로필 — 본격 실행용
+# ==============================================
+
+app:
+  env: prod
+  log_level: WARNING
+
+generation:
+  backend: openai
+  mode: live
+  auto_approve: false
+  static_review_required: true
+
+backtest:
+  compute_attribution: true
+
+backtest_worker:
+  review_gate_required: true
+
+workers:
+  generation_poll_interval: 10.0
+  backtest_poll_interval: 10.0

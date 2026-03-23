@@ -1,0 +1,22 @@
+# ==============================================
+# 백테스트 공통 기본값 (Core Defaults)
+# ==============================================
+# load_config()가 기본 config stack의 일부로 자동 로드합니다.
+# 스크립트, 워커, PipelineRunner 모두가 이 값을 공유합니다.
+#
+# 워커/오케스트레이션 전용 설정 → backtest_worker.yaml
+# qlib 스타일 상세 설정 (config stack 미포함) → backtest_core.yaml
+
+backtest:
+  initial_cash: 100000000        # KRW (1e8)
+  seed: 42
+  resample: "1s"
+  trade_lookback: 100
+
+  # 단일 백테스트 기본값
+  latency_ms: 1.0
+  fee_model: krx
+  impact_model: linear
+  slicing_algo: TWAP
+  placement_style: spread_adaptive
+  compute_attribution: true

@@ -1,0 +1,14 @@
+# ==============================================
+# 경로 설정
+# ==============================================
+# 상대 경로는 프로젝트 루트 기준으로 resolve됩니다.
+# 절대 경로는 그대로 사용됩니다.
+
+paths:
+  data_dir: /home/dgu/tick/open-trading-api/data/realtime/H0STASP0
+  registry_dir: strategies
+  jobs_dir: jobs
+  outputs_dir: outputs
+  traces_dir: outputs/strategy_traces
+  replays_dir: outputs/replays
+  logs_dir: logs

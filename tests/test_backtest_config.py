@@ -10,7 +10,7 @@ import pytest
 import sys
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
-from layer7_validation.backtest_config import (
+from evaluation_orchestration.layer7_validation.backtest_config import (
     BacktestConfig,
     FeeConfig,
     ImpactConfig,

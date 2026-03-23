@@ -1,0 +1,16 @@
+# ==============================================
+# Dev 프로필 — 로컬 개발용
+# ==============================================
+
+app:
+  env: dev
+  log_level: DEBUG
+
+generation:
+  backend: template
+  mode: mock
+  auto_approve: true
+
+workers:
+  generation_poll_interval: 2.0
+  backtest_poll_interval: 2.0

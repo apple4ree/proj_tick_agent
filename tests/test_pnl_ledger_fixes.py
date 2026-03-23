@@ -21,8 +21,8 @@ def _make_fill(
     slippage_bps=1.0, impact_bps=0.5, latency_ms=1.0,
     parent_id="parent-1", order_id=None,
 ):
-    from layer5_simulator.bookkeeper import FillEvent
-    from layer3_order.order_types import OrderSide
+    from market_simulation.layer5_simulator.bookkeeper import FillEvent
+    from execution_planning.layer3_order.order_types import OrderSide
 
     return FillEvent(
         timestamp=pd.Timestamp(timestamp),
@@ -48,7 +48,7 @@ class TestPnLLedgerUnrealized:
 
     def test_unrealized_is_last_snapshot_not_sum(self):
         """Core regression: unrealized must NOT accumulate across fills."""
-        from layer6_evaluator.pnl_ledger import PnLLedger
+        from evaluation_orchestration.layer6_evaluator.pnl_ledger import PnLLedger
 
         ledger = PnLLedger()
 
@@ -71,7 +71,7 @@ class TestPnLLedgerUnrealized:
 
     def test_unrealized_after_closing_position(self):
         """When position is fully closed, unrealized should be 0."""
-        from layer6_evaluator.pnl_ledger import PnLLedger
+        from evaluation_orchestration.layer6_evaluator.pnl_ledger import PnLLedger
 
         ledger = PnLLedger()
 
@@ -90,7 +90,7 @@ class TestPnLLedgerUnrealized:
 
     def test_net_pnl_identity(self):
         """net_pnl = realized + unrealized(last) - commission - tax."""
-        from layer6_evaluator.pnl_ledger import PnLLedger
+        from evaluation_orchestration.layer6_evaluator.pnl_ledger import PnLLedger
 
         ledger = PnLLedger()
 
@@ -113,7 +113,7 @@ class TestPnLLedgerUnrealized:
 
     def test_pnl_series_last_matches_net_pnl(self):
         """Last value of pnl_series should equal report.net_pnl."""
-        from layer6_evaluator.pnl_ledger import PnLLedger
+        from evaluation_orchestration.layer6_evaluator.pnl_ledger import PnLLedger
 
         ledger = PnLLedger()
 
@@ -131,7 +131,7 @@ class TestPnLLedgerUnrealized:
 
     def test_cumulative_pnl_series_matches_report(self):
         """cumulative_pnl_series() and generate_report().pnl_series should agree."""
-        from layer6_evaluator.pnl_ledger import PnLLedger
+        from evaluation_orchestration.layer6_evaluator.pnl_ledger import PnLLedger
 
         ledger = PnLLedger()
         for i in range(5):
@@ -153,7 +153,7 @@ class TestParentOverfill:
 
     def test_fill_simulator_caps_at_parent_remaining(self):
         """FillSimulator must not fill beyond parent.total_qty."""
-        from layer3_order.order_types import (
+        from execution_planning.layer3_order.order_types import (
             ChildOrder, ParentOrder, OrderSide, OrderType, OrderTIF, OrderStatus,
         )
 
@@ -174,7 +174,7 @@ class TestParentOverfill:
 
     def test_slice_order_respects_in_flight_children(self):
         """_slice_order should deduct in-flight children from effective remaining."""
-        from layer3_order.order_types import (
+        from execution_planning.layer3_order.order_types import (
             ChildOrder, ParentOrder, OrderSide, OrderType, OrderStatus,
         )
 
@@ -200,7 +200,7 @@ class TestParentOverfill:
 
     def test_overfill_guard_clamps_filled_qty(self):
         """simulate_fills must not increment parent.filled_qty beyond total_qty."""
-        from layer3_order.order_types import (
+        from execution_planning.layer3_order.order_types import (
             ChildOrder, ParentOrder, OrderSide, OrderType,
         )
 
@@ -215,7 +215,7 @@ class TestParentOverfill:
 
     def test_fill_rate_never_exceeds_one(self):
         """ParentOrder.fill_rate should be <= 1.0 after fix."""
-        from layer3_order.order_types import ParentOrder, OrderSide
+        from execution_planning.layer3_order.order_types import ParentOrder, OrderSide
 
         parent = ParentOrder.create(
             symbol="TEST", side=OrderSide.BUY, qty=100, arrival_mid=1000.0,

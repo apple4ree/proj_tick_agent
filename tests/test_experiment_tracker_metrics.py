@@ -16,7 +16,7 @@ for p in (PROJECT_ROOT, SRC_ROOT, SCRIPTS_ROOT):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
-from layer7_validation.backtest_config import BacktestResult
+from evaluation_orchestration.layer7_validation.backtest_config import BacktestResult
 
 
 def _load_module(name: str):

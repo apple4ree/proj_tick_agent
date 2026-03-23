@@ -1,0 +1,15 @@
+# ==============================================
+# 백테스트 워커 / 오케스트레이션 설정
+# ==============================================
+# load_config()가 기본 config stack의 일부로 자동 로드합니다.
+# Universe 백테스트 latency sweep, execution gate 등 워커·실행 계층 전용 설정.
+#
+# 공통 백테스트 기본값 → backtest_base.yaml
+# qlib 스타일 상세 설정 (config stack 미포함) → backtest_core.yaml
+
+backtest_worker:
+  # Universe 백테스트 latency sweep
+  latencies_ms: [0.0, 50.0, 100.0, 500.0, 1000.0]
+
+  # Execution gate — approved + static_review_passed 필수
+  review_gate_required: true
