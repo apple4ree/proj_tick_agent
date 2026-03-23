@@ -32,10 +32,10 @@ proj_rl_agent/
 │   │   └── layer0_data/         #   데이터 수집·정제·동기화·피처
 │   │
 │   ├── strategy_block/          # ── Strategy Block ──
-│   │   ├── strategy_generation/ #   전략 생성 (template / OpenAI multi-agent)
-│   │   ├── strategy_review/     #   정적 규칙 기반 전략 검토
-│   │   ├── strategy_specs/      #   전략 사양 스키마
-│   │   ├── strategy_compiler/   #   Spec → Strategy 컴파일러
+│   │   ├── strategy_generation/ #   전략 생성 (v1: template/OpenAI, v2: template+lowering)
+│   │   ├── strategy_review/     #   정적 규칙 기반 전략 검토 (v1 + v2)
+│   │   ├── strategy_specs/      #   전략 사양 스키마 (v1 + v2 AST)
+│   │   ├── strategy_compiler/   #   Spec → Strategy 컴파일러 (v1/v2 디스패치)
 │   │   ├── strategy_registry/   #   전략 저장·관리 + metadata/promotion
 │   │   └── strategy/            #   Strategy ABC (base.py)
 │   │
@@ -151,6 +151,10 @@ PYTHONPATH=src python scripts/backtest_strategy_universe.py \
 
 ## Strategy Spec 형식
 
+두 가지 사양 형식을 지원하며, `compile_strategy(spec)`가 자동 분기한다.
+
+### v1 (StrategySpec) — flat rule 리스트
+
 ```json
 {
   "name": "imbalance_momentum",
@@ -169,6 +173,34 @@ PYTHONPATH=src python scripts/backtest_strategy_universe.py \
   ]
 }
 ```
+
+### v2 (StrategySpecV2) — 계층적 IR + Expression AST
+
+```json
+{
+  "spec_format": "v2",
+  "name": "imbalance_persist_momentum",
+  "entry_policies": [
+    {
+      "name": "long_entry", "side": "long",
+      "trigger": {"type": "persist", "expr": {"type": "comparison", "feature": "order_imbalance", "op": ">", "threshold": 0.25}, "window": 5, "min_true": 3},
+      "strength": {"type": "const", "value": 0.5}
+    }
+  ],
+  "exit_policies": [{"name": "exits", "rules": [
+    {"name": "stop", "priority": 1,
+     "condition": {"type": "comparison", "feature": "order_imbalance", "op": "<", "threshold": -0.2},
+     "action": {"type": "close_all"}}
+  ]}],
+  "risk_policy": {"max_position": 500, "inventory_cap": 1000},
+  "regimes": [
+    {"name": "trending", "priority": 1, "when": {"type": "comparison", "feature": "spread_bps", "op": "<", "threshold": 15.0}, "entry_policy_refs": ["long_entry"], "exit_policy_ref": "exits"}
+  ],
+  "execution_policy": {"placement_mode": "adaptive", "cancel_after_ticks": 20, "max_reprices": 3}
+}
+```
+
+**AST 노드**: `const`, `feature`, `comparison`, `all`, `any`, `not`, `cross`, `lag`, `rolling`, `persist`
 
 ## Universe 평가 프로토콜
 

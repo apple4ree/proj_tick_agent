@@ -20,7 +20,7 @@ from typing import Any
 from evaluation_orchestration.orchestration.file_queue import FileQueue
 from evaluation_orchestration.orchestration.models import Job, JobType, JobStatus
 from strategy_block.strategy_registry.registry import StrategyRegistry
-from strategy_block.strategy_compiler.compiler import StrategyCompiler
+from strategy_block.strategy_compiler import compile_strategy
 
 logger = logging.getLogger(__name__)
 
@@ -95,9 +95,9 @@ class BacktestWorker:
             # 3) Load spec (version-pinned, gate-checked)
             spec = self.registry.load_spec_for_execution(name, version)
 
-            # 4) Compile
+            # 4) Compile (v1/v2 dispatch)
             def strategy_factory():
-                return StrategyCompiler.compile(spec)
+                return compile_strategy(spec)
 
             # 5) Dispatch
             run_id = uuid.uuid4().hex[:12]

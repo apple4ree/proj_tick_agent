@@ -13,7 +13,7 @@ File layout
 ::
 
     <registry_dir>/
-        <name>_v<version>.json         # StrategySpec
+        <name>_v<version>.json         # StrategySpec or StrategySpecV2
         <name>_v<version>.meta.json    # StrategyMetadata
 """
 from __future__ import annotations
@@ -21,14 +21,34 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Union
 
 from strategy_block.strategy_specs.schema import StrategySpec
-from strategy_block.strategy_compiler.compiler import StrategyCompiler, CompiledStrategy
+from strategy_block.strategy_specs.v2.schema_v2 import StrategySpecV2
+from strategy_block.strategy_compiler import compile_strategy
 
 from .models import StrategyMetadata, StrategyStatus, VALID_TRANSITIONS
 
 logger = logging.getLogger(__name__)
+
+# Union type for any spec version
+AnySpec = Union[StrategySpec, StrategySpecV2]
+
+
+def _load_spec_by_format(path: Path, spec_format: str) -> AnySpec:
+    """Load a spec JSON using the correct class based on *spec_format*."""
+    if spec_format == "v2":
+        return StrategySpecV2.load(path)
+    return StrategySpec.load(path)
+
+
+def _detect_spec_format(path: Path) -> str:
+    """Detect spec format by reading the JSON and checking spec_format field."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data.get("spec_format", "v1")
+    except Exception:
+        return "v1"
 
 
 class StrategyRegistry:
@@ -60,23 +80,42 @@ class StrategyRegistry:
         if not path.exists():
             raise FileNotFoundError(f"Strategy not found: {path}")
 
+    def _resolve_spec_format(self, name: str, version: str) -> str:
+        """Determine spec_format using metadata first, falling back to JSON."""
+        mp = self._meta_path(name, version)
+        if mp.exists():
+            try:
+                meta = StrategyMetadata.load(mp)
+                return meta.spec_format
+            except Exception:
+                pass
+        # Fallback: peek at JSON content
+        return _detect_spec_format(self._spec_path(name, version))
+
     # -- core CRUD ------------------------------------------------------------
 
     def save_spec(
         self,
-        spec: StrategySpec,
+        spec: AnySpec,
         *,
         generation_backend: str = "",
         generation_mode: str = "",
         trace_path: str = "",
         extra: dict | None = None,
+        spec_format: str = "v1",
     ) -> Path:
         """Save a strategy spec and create its metadata record.
 
+        Works with both StrategySpec (v1) and StrategySpecV2 (v2).
         Returns the path where the spec was saved.
         """
         sp = self._spec_path(spec.name, spec.version)
         spec.save(sp)
+
+        # Auto-detect spec_format from spec type
+        detected_format = spec_format
+        if hasattr(spec, "spec_format"):
+            detected_format = getattr(spec, "spec_format", spec_format)
 
         meta = StrategyMetadata(
             strategy_id=self._strategy_id(spec.name, spec.version),
@@ -85,6 +124,7 @@ class StrategyRegistry:
             status=StrategyStatus.DRAFT,
             generation_backend=generation_backend,
             generation_mode=generation_mode,
+            spec_format=detected_format,
             spec_path=str(sp),
             trace_path=trace_path,
             extra=extra or {},
@@ -93,15 +133,15 @@ class StrategyRegistry:
         logger.info("Saved strategy '%s' v%s to %s", spec.name, spec.version, sp)
         return sp
 
-    def load_spec(self, name: str, version: str) -> StrategySpec:
+    def load_spec(self, name: str, version: str) -> AnySpec:
         """Load a strategy spec by name and **explicit** version.
 
-        Execution-plane callers must always provide a version to ensure
-        reproducibility.  Use :meth:`resolve_version` or
-        :meth:`latest_approved` to discover the version first.
+        Automatically detects v1/v2 format via metadata or JSON content
+        and returns the appropriate spec class.
         """
         self._ensure_exists(name, version)
-        return StrategySpec.load(self._spec_path(name, version))
+        fmt = self._resolve_spec_format(name, version)
+        return _load_spec_by_format(self._spec_path(name, version), fmt)
 
     def get_metadata(self, name: str, version: str) -> StrategyMetadata:
         """Return the metadata record for a given spec version."""
@@ -198,32 +238,33 @@ class StrategyRegistry:
         last = candidates[-1].stem  # e.g. "foo_v2.1"
         return last.split("_v", 1)[1]
 
-    def latest_approved(self, name: str) -> StrategySpec:
+    def latest_approved(self, name: str) -> AnySpec:
         """Return the latest spec whose status is APPROVED or higher.
 
         "Higher" means PROMOTED_TO_BACKTEST or PROMOTED_TO_LIVE.
+        Correctly loads v1 or v2 specs based on metadata.
         """
         eligible_statuses = {
             StrategyStatus.APPROVED,
             StrategyStatus.PROMOTED_TO_BACKTEST,
             StrategyStatus.PROMOTED_TO_LIVE,
         }
-        candidates: list[tuple[str, Path]] = []
+        candidates: list[tuple[str, str, str]] = []  # (version, name, format)
         for mp in sorted(self.registry_dir.glob(f"{name}_v*.meta.json")):
             try:
                 meta = StrategyMetadata.load(mp)
             except Exception:
                 continue
             if meta.status in eligible_statuses:
-                candidates.append((meta.version, self._spec_path(meta.name, meta.version)))
+                candidates.append((meta.version, meta.name, meta.spec_format))
 
         if not candidates:
             raise FileNotFoundError(
                 f"No approved strategy named '{name}' in registry"
             )
         # take the last (highest version) after sort
-        _, spec_path = candidates[-1]
-        return StrategySpec.load(spec_path)
+        ver, nm, fmt = candidates[-1]
+        return _load_spec_by_format(self._spec_path(nm, ver), fmt)
 
     # -- execution gate -------------------------------------------------------
 
@@ -277,41 +318,43 @@ class StrategyRegistry:
         version: str,
         *,
         require_live: bool = False,
-    ) -> StrategySpec:
+    ) -> AnySpec:
         """Load a spec only if it passes the execution gate.
 
         This is the **only** path the execution plane should use to obtain
         a spec.  It guarantees version-pinned, gate-checked access.
+        Returns the correct spec type (v1 or v2).
         """
         self.check_execution_gate(name, version, require_live=require_live)
         return self.load_spec(name, version)
 
     # -- compile shortcut -----------------------------------------------------
 
-    def compile(self, name: str, version: str) -> CompiledStrategy:
-        """Load and compile a strategy spec (version-pinned)."""
+    def compile(self, name: str, version: str):
+        """Load and compile a strategy spec (version-pinned, v1/v2 aware)."""
         spec = self.load_spec(name, version)
-        return StrategyCompiler.compile(spec)
+        return compile_strategy(spec)
 
     # -- iteration ------------------------------------------------------------
 
-    def iter_specs(self) -> Iterator[StrategySpec]:
-        """Iterate over all strategy specs in the registry."""
+    def iter_specs(self) -> Iterator[AnySpec]:
+        """Iterate over all strategy specs in the registry (v1 and v2)."""
         for path in sorted(self.registry_dir.glob("*.json")):
             if path.name.endswith(".meta.json"):
                 continue
             try:
-                yield StrategySpec.load(path)
+                fmt = _detect_spec_format(path)
+                yield _load_spec_by_format(path, fmt)
             except Exception as exc:
                 logger.warning("Failed to load %s: %s", path, exc)
 
     # -- legacy compat (deprecated) -------------------------------------------
 
-    def save(self, spec: StrategySpec) -> Path:
+    def save(self, spec: AnySpec) -> Path:
         """Deprecated: use :meth:`save_spec` instead."""
         return self.save_spec(spec)
 
-    def load(self, name: str, version: str | None = None) -> StrategySpec:
+    def load(self, name: str, version: str | None = None) -> AnySpec:
         """Deprecated: use :meth:`load_spec` with explicit version."""
         resolved = self.resolve_version(name, version)
         return self.load_spec(name, resolved)
@@ -323,16 +366,23 @@ class StrategyRegistry:
             if path.name.endswith(".meta.json"):
                 continue
             try:
-                spec = StrategySpec.load(path)
-                result.append({
+                fmt = _detect_spec_format(path)
+                spec = _load_spec_by_format(path, fmt)
+                info: dict = {
                     "name": spec.name,
                     "version": spec.version,
                     "description": spec.description,
-                    "n_signal_rules": len(spec.signal_rules),
-                    "n_filters": len(spec.filters),
-                    "n_exit_rules": len(spec.exit_rules),
+                    "spec_format": fmt,
                     "path": str(path),
-                })
+                }
+                if fmt == "v1":
+                    info["n_signal_rules"] = len(spec.signal_rules)
+                    info["n_filters"] = len(spec.filters)
+                    info["n_exit_rules"] = len(spec.exit_rules)
+                else:
+                    info["n_entry_policies"] = len(spec.entry_policies)
+                    info["n_exit_policies"] = len(spec.exit_policies)
+                result.append(info)
             except Exception as exc:
                 logger.warning("Failed to load %s: %s", path, exc)
         return result

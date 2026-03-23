@@ -47,8 +47,8 @@ from evaluation_orchestration.layer7_validation import (
     PipelineRunner,
 )
 from strategy_block.strategy.base import Strategy
-from strategy_block.strategy_compiler.compiler import StrategyCompiler
-from strategy_block.strategy_specs.schema import StrategySpec
+from strategy_block.strategy_compiler import compile_strategy
+from strategy_block.strategy_registry.registry import _detect_spec_format, _load_spec_by_format
 from utils.config import load_config, get_paths, get_backtest, get_backtest_worker
 
 logger = logging.getLogger(__name__)
@@ -141,10 +141,18 @@ def build_config(args: argparse.Namespace, bt_cfg: dict | None = None) -> Backte
     )
 
 
+def _load_spec(path: str):
+    """Load a strategy spec (v1 or v2) from a JSON file."""
+    from pathlib import Path as P
+    p = P(path)
+    fmt = _detect_spec_format(p)
+    return _load_spec_by_format(p, fmt)
+
+
 def _build_strategy(args: argparse.Namespace) -> Strategy:
-    """Compile a strategy from the spec JSON."""
-    spec = StrategySpec.load(args.spec)
-    return StrategyCompiler.compile(spec)
+    """Compile a strategy from the spec JSON (v1 or v2)."""
+    spec = _load_spec(args.spec)
+    return compile_strategy(spec)
 
 
 def run_backtest(args: argparse.Namespace, cfg: dict | None = None) -> BacktestResult:

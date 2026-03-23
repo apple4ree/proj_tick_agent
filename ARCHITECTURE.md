@@ -89,9 +89,12 @@ Data ──▶ Strategy ──▶ Execution Planning ──▶ Market Simulation
 대응 5-Block: **Strategy** (Block 2)
 
 주요 모듈:
-- `src/strategy_block/strategy_generation/`
-- `src/strategy_block/strategy_review/`
-- `src/strategy_block/strategy_specs/`
+- `src/strategy_block/strategy_generation/` (v1: template/OpenAI)
+- `src/strategy_block/strategy_generation/v2/` (v2: template + lowering)
+- `src/strategy_block/strategy_review/` (v1 reviewer)
+- `src/strategy_block/strategy_review/v2/` (v2 reviewer)
+- `src/strategy_block/strategy_specs/` (v1 schema)
+- `src/strategy_block/strategy_specs/v2/` (v2 schema + AST)
 
 ### 2. Strategy Registry
 
@@ -131,7 +134,8 @@ Data ──▶ Strategy ──▶ Execution Planning ──▶ Market Simulation
 대응 5-Block: **Data** (Block 1) + **Execution Planning** (Block 3) + **Market Simulation** (Block 4) + **Evaluation** (Block 5)
 
 주요 모듈:
-- `src/strategy_block/strategy_compiler/`
+- `src/strategy_block/strategy_compiler/` (v1/v2 디스패치: `compile_strategy()`)
+- `src/strategy_block/strategy_compiler/v2/` (v2 컴파일러 + AST 런타임)
 - `src/data/layer0_data/` ~ `src/evaluation_orchestration/layer7_validation/`
 - `scripts/backtest.py`
 - `scripts/backtest_strategy_universe.py`
@@ -220,6 +224,7 @@ Data ──▶ Strategy ──▶ Execution Planning ──▶ Market Simulation
 - `name`
 - `version`
 - `status`
+- `spec_format` (`v1` 또는 `v2`)
 - `created_at`
 - `generation_backend`
 - `generation_mode`
@@ -370,6 +375,26 @@ proj_rl_agent/
 - YAML config 기반 설정 관리
 - Shell 런처 기반 실행 구조
 - Profile-based 환경 분리 (dev/smoke/prod)
+
+### Phase 3.6 — ✅ 완료
+- StrategySpec v2 Phase 1 (계층적 IR + Expression AST)
+- v2 컴파일러/런타임 (AST evaluator, entry/exit policy, cooldown)
+- v2 검토기 Phase 1 (7개 카테고리)
+- v2 전략 생성 Phase 1 (template + lowering, 3개 템플릿)
+- `compile_strategy()` v1/v2 자동 디스패치
+- Registry spec_format 필드 추가 (v1/v2 공존)
+
+### Phase 3.7 — ✅ 완료
+- v1/v2 공존 결함 수정: registry load/compile/backtest 경로에서 v2 spec을 올바르게 처리
+  - `_detect_spec_format()`, `_load_spec_by_format()` 헬퍼 추가
+  - `backtest.py`, `backtest_strategy_universe.py`, `backtest_worker.py`에서 v2 디스패치 적용
+- v2 Phase 2 AST 확장: `LagExpr` (N-tick 지연), `RollingExpr` (구간 집계), `PersistExpr` (조건 지속)
+- v2 런타임 확장: feature history buffer (deque, maxlen=500), persist condition tracking
+- Regime 시스템: 우선순위 기반 시장 상태 분류 → entry/exit/risk 정책 라우팅 (`RegimeV2`)
+- Execution policy (hint-level): `ExecutionPolicyV2` — placement_mode, cancel_after_ticks, max_reprices, do_not_trade_when
+- v2 검토기 Phase 2: 4개 카테고리 추가 (dead_regime, regime_reference_integrity, execution_risk_mismatch, latency_structure_warning) → 총 11개
+- v2 전략 생성 Phase 2: 3개 템플릿 추가 (regime_filtered_persist_momentum, rolling_mean_reversion, adaptive_execution_imbalance) → 총 6개
+- lowering.py 확장: regime/execution_policy/persist trigger 지원
 
 ### Phase 4 — 예정
 - paper/live trading worker 분리

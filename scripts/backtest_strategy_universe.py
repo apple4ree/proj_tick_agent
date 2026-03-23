@@ -49,8 +49,8 @@ for path in (PROJECT_ROOT, SRC_ROOT):
 from data.layer0_data import DataIngester, MarketStateBuilder
 from evaluation_orchestration.layer7_validation import BacktestConfig, PipelineRunner
 from evaluation_orchestration.layer7_validation.backtest_config import LatencyConfig
-from strategy_block.strategy_specs.schema import StrategySpec
-from strategy_block.strategy_compiler.compiler import StrategyCompiler
+from strategy_block.strategy_compiler import compile_strategy
+from strategy_block.strategy_registry.registry import _detect_spec_format, _load_spec_by_format
 from utils.config import load_config, get_paths, get_backtest, get_backtest_worker
 
 logger = logging.getLogger(__name__)
@@ -284,12 +284,12 @@ def main() -> None:
     resample = bt.get("resample", "1s")
     base_output_dir = paths.get("outputs_dir", "outputs") + "/universe_backtest"
 
-    # Load and compile strategy
-    spec = StrategySpec.load(args.spec)
+    # Load and compile strategy (v1 or v2)
+    spec = _load_spec_by_format(Path(args.spec), _detect_spec_format(Path(args.spec)))
     compiled_spec = spec
 
     def strategy_factory():
-        return StrategyCompiler.compile(compiled_spec)
+        return compile_strategy(compiled_spec)
 
     print(f"Strategy: {spec.name} (v{spec.version})")
     print(f"Description: {spec.description}")

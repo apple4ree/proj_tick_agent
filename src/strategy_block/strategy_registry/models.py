@@ -102,6 +102,7 @@ class StrategyMetadata:
     static_review_passed: bool = False
     approved_for_backtest: bool = False
     approved_for_live: bool = False
+    spec_format: str = "v1"  # "v1" or "v2"
     spec_path: str = ""
     trace_path: str = ""
     extra: dict[str, Any] = field(default_factory=dict)
