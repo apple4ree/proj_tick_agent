@@ -1,9 +1,3 @@
-from .schema import StrategySpec, SignalRule, FilterRule, PositionRule, ExitRule
+from .v2.schema_v2 import StrategySpecV2
 
-__all__ = [
-    "StrategySpec",
-    "SignalRule",
-    "FilterRule",
-    "PositionRule",
-    "ExitRule",
-]
+__all__ = ["StrategySpecV2"]

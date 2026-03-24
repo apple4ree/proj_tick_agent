@@ -46,6 +46,7 @@ def _run_direct_with_config(tmp_path: Path, extra_paths: dict | None = None) -> 
             "replays_dir": str(tmp_path / "replays"),
         },
         "generation": {
+            "spec_format": "v2",
             "backend": "template",
             "mode": "live",
             "latency_ms": 1.0,
@@ -86,6 +87,7 @@ def _run_direct_with_config(tmp_path: Path, extra_paths: dict | None = None) -> 
     raise AssertionError(f"GENERATED_SPEC not found in output:\n{output}")
 
 
+@pytest.mark.v2_core
 class TestDirectModeCanonicalPaths:
 
     def test_default_registry_dir(self, tmp_path: Path):
@@ -105,7 +107,7 @@ class TestDirectModeCanonicalPaths:
         # Meta file must also be in registry_dir
         meta_path = spec_path.with_suffix("").with_suffix(".meta.json")
         # StrategyRegistry naming: <name>_v<version>.meta.json
-        stem = spec_path.stem  # e.g. imbalance_momentum_v1.0
+        stem = spec_path.stem  # e.g. <strategy_name>_v2.0
         meta_path = registry_dir / f"{stem}.meta.json"
         assert meta_path.exists()
 
@@ -141,15 +143,20 @@ class TestDirectModeCanonicalPaths:
         assert "generation_outcome" in data
 
     def test_spec_content_is_valid(self, tmp_path: Path):
-        """Generated spec is a valid StrategySpec JSON."""
-        from strategy_block.strategy_specs.schema import StrategySpec
+        """Generated spec is a valid canonical v2 StrategySpec JSON."""
+        from strategy_block.strategy_specs.v2.schema_v2 import StrategySpecV2
+        from strategy_block.strategy_registry.registry import _detect_spec_format
 
         registry_dir = tmp_path / "reg"
         spec_path_str = _run_direct_with_config(tmp_path, {
             "registry_dir": str(registry_dir),
             "traces_dir": str(tmp_path / "traces"),
         })
-        spec = StrategySpec.load(spec_path_str)
+        spec_path = Path(spec_path_str)
+        fmt = _detect_spec_format(spec_path)
+        assert fmt == "v2"
+
+        spec = StrategySpecV2.load(spec_path)
         assert spec.name
         assert spec.version
-        assert len(spec.signal_rules) >= 1
+        assert len(spec.entry_policies) >= 1

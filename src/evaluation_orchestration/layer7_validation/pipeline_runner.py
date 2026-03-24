@@ -372,6 +372,16 @@ class PipelineRunner:
         parent.meta["suggested_order_type"] = order_type.value
         parent.meta["suggested_tif"] = tif.value
         parent.meta["scheduling_hint"] = repr(self._order_scheduler.create_hint(parent, state))
+
+        hints: dict[str, object] = {}
+        if signal is not None and getattr(signal, "tags", None):
+            tags = signal.tags
+            for key in ("placement_mode", "cancel_after_ticks", "max_reprices"):
+                if key in tags:
+                    hints[key] = tags[key]
+        if hints:
+            parent.meta["execution_hints"] = hints
+
         parent = self._order_constraints.apply_all(parent, state)
         if parent.status.name == "REJECTED" or parent.total_qty <= 0:
             return None
@@ -410,10 +420,18 @@ class PipelineRunner:
         if qty <= 0:
             return []
 
-        child = self._placement_policy.place(parent, qty, state)
+        from execution_planning.layer4_execution.placement_policy import resolve_placement_policy
+
+        hints = parent.meta.get("execution_hints", {}) if parent.meta else {}
+        effective_placement = resolve_placement_policy(self._placement_policy, hints)
+        child = effective_placement.place(parent, qty, state)
+        child.meta["placement_policy"] = effective_placement.name
         child.submitted_time = state.timestamp
         child.submit_time = state.timestamp
         child.arrival_mid = parent.arrival_mid
+        child.meta.setdefault("reprice_count", 0)
+        if hints:
+            child.meta["execution_hints"] = dict(hints)
         if trigger is not None:
             child.meta["timing_trigger"] = trigger.value
 
@@ -451,8 +469,16 @@ class PipelineRunner:
             self._sync_open_children(symbol, parent)
             return []
 
+        hints = parent.meta.get("execution_hints", {}) if parent.meta else {}
+        cancel_after_ticks = hints.get("cancel_after_ticks") if isinstance(hints, dict) else None
+        max_reprices = hints.get("max_reprices") if isinstance(hints, dict) else None
+
         actions = self._cancel_replace.process_open_orders(
-            open_orders=open_children, state=state, current_time=state.timestamp,
+            open_orders=open_children,
+            state=state,
+            current_time=state.timestamp,
+            cancel_after_ticks=(int(cancel_after_ticks) if isinstance(cancel_after_ticks, (int, float)) else None),
+            max_reprices=(int(max_reprices) if isinstance(max_reprices, (int, float)) else None),
         )
 
         executable_children = []
@@ -498,6 +524,10 @@ class PipelineRunner:
         )
         replacement_child.meta["replaces"] = child.child_id
         replacement_child.meta["replace_reason"] = reason
+        prev_reprices = int(child.meta.get("reprice_count", 0))
+        replacement_child.meta["reprice_count"] = prev_reprices + 1
+        if parent.meta and isinstance(parent.meta.get("execution_hints"), dict):
+            replacement_child.meta["execution_hints"] = dict(parent.meta["execution_hints"])
         parent.child_orders.append(replacement_child)
         self._last_child_submission[parent.symbol] = state.timestamp
         return replacement_child

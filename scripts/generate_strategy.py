@@ -1,24 +1,4 @@
-"""
-전략 생성 스크립트.
-
-두 가지 모드를 지원합니다:
-  --direct   : 직접 생성 후 registry에 저장 (shell launcher 연동용)
-  (기본)      : job queue에 제출 (generation worker가 처리)
-
-사용법:
-    cd /home/dgu/tick/proj_rl_agent
-
-    # Job queue 제출 (기본)
-    PYTHONPATH=src python scripts/generate_strategy.py --goal "Order imbalance alpha"
-
-    # 직접 생성 (queue 우회)
-    PYTHONPATH=src python scripts/generate_strategy.py \
-        --goal "Order imbalance alpha" --direct
-
-    # Backend/mode CLI override (config보다 우선)
-    PYTHONPATH=src python scripts/generate_strategy.py \
-        --goal "Spread mean reversion" --backend openai --mode mock --direct
-"""
+"""전략 생성 스크립트 (StrategySpec v2 only)."""
 from __future__ import annotations
 
 import argparse
@@ -26,6 +6,7 @@ import json
 import logging
 import sys
 from pathlib import Path
+from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
@@ -38,7 +19,7 @@ from utils.config import load_config, get_paths, get_generation
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Submit a strategy generation job")
+    parser = argparse.ArgumentParser(description="Submit a StrategySpec v2 generation job")
     parser.add_argument("--goal", required=True,
                         help="Research goal — used to select templates or prompt LLM")
     parser.add_argument("--config", default=None,
@@ -46,6 +27,8 @@ def parse_args() -> argparse.Namespace:
                              "(app+paths+generation+backtest_base+backtest_worker+workers+profile)")
     parser.add_argument("--profile", default=None,
                         help="Config profile (dev, smoke, prod) — merged after base files, before --config")
+    parser.add_argument("--spec-format", default=None, choices=["v2"],
+                        help="Spec format (fixed to v2)")
     parser.add_argument("--backend", default=None,
                         help="Override generation backend (template | openai)")
     parser.add_argument("--mode", default=None,
@@ -58,8 +41,27 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _trace_flags(trace: dict[str, Any]) -> dict[str, Any]:
+    fallback = dict(trace.get("fallback") or {})
+    events = list(fallback.get("events") or [])
+    provenance = dict(trace.get("provenance") or {})
+
+    return {
+        "generation_outcome": trace.get("generation_outcome", "unknown"),
+        "static_review_passed": bool(trace.get("static_review_passed", False)),
+        "fallback_used": bool(trace.get("fallback_used", False) or fallback.get("used", False)),
+        "fallback_count": int(fallback.get("count", len(events))),
+        "fallback_events": events,
+        "generation_class": provenance.get("generation_class", "unknown"),
+        "requested_backend": provenance.get("requested_backend", ""),
+        "effective_backend": provenance.get("effective_backend", ""),
+        "requested_mode": provenance.get("requested_mode", ""),
+        "effective_mode": provenance.get("effective_mode", ""),
+        "spec_format": "v2",
+    }
+
+
 def _run_direct(args: argparse.Namespace, cfg: dict) -> None:
-    """Generate a strategy directly, save to registry, print spec path."""
     from strategy_block.strategy_generation.generator import StrategyGenerator
     from strategy_block.strategy_registry.registry import StrategyRegistry
     from strategy_block.strategy_registry.models import StrategyStatus
@@ -75,6 +77,10 @@ def _run_direct(args: argparse.Namespace, cfg: dict) -> None:
         latency_ms=gen["latency_ms"],
         backend=backend,
         mode=mode,
+        spec_format="v2",
+        allow_template_fallback=gen["allow_template_fallback"],
+        allow_heuristic_fallback=gen["allow_heuristic_fallback"],
+        fail_on_fallback=gen["fail_on_fallback"],
     )
 
     spec, trace = generator.generate(
@@ -83,7 +89,6 @@ def _run_direct(args: argparse.Namespace, cfg: dict) -> None:
         idea_index=gen["idea_index"],
     )
 
-    # Save trace
     trace_dir = Path(paths["traces_dir"])
     trace_dir.mkdir(parents=True, exist_ok=True)
     trace_path = trace_dir / f"{spec.name}_v{spec.version}_trace.json"
@@ -92,16 +97,16 @@ def _run_direct(args: argparse.Namespace, cfg: dict) -> None:
         encoding="utf-8",
     )
 
-    # Save spec to registry (canonical key: paths.registry_dir)
     registry = StrategyRegistry(registry_dir=paths["registry_dir"])
     spec_path = registry.save_spec(
         spec,
         generation_backend=backend,
         generation_mode=mode,
         trace_path=str(trace_path),
+        extra={"generation": _trace_flags(trace)},
+        spec_format="v2",
     )
 
-    # Mark review passed + status transitions
     meta = registry.get_metadata(spec.name, spec.version)
     meta.static_review_passed = True
     meta.save(registry._meta_path(spec.name, spec.version))
@@ -110,26 +115,30 @@ def _run_direct(args: argparse.Namespace, cfg: dict) -> None:
         registry.update_status(spec.name, spec.version, StrategyStatus.APPROVED)
 
     print(f"Generated strategy: {spec.name} v{spec.version}")
+    print("  spec_format: v2")
     print(f"  backend: {backend}")
     print(f"  mode:    {mode}")
     print(f"  outcome: {trace.get('generation_outcome', 'success')}")
-    # Machine-friendly output for shell script parsing
+    print(f"  fallback_used: {trace.get('fallback_used', False)}")
     print(f"GENERATED_SPEC={spec_path.resolve()}")
 
 
 def _run_queue(args: argparse.Namespace, cfg: dict) -> None:
-    """Submit a generation job to the queue (original behavior)."""
     paths = get_paths(cfg)
     gen = get_generation(cfg)
 
     payload = {
         "research_goal": args.goal,
+        "spec_format": "v2",
         "backend": args.backend or gen["backend"],
         "mode": args.mode or gen["mode"],
         "latency_ms": gen["latency_ms"],
         "n_ideas": gen["n_ideas"],
         "idea_index": gen["idea_index"],
         "auto_approve": args.auto_approve if args.auto_approve is not None else gen["auto_approve"],
+        "allow_template_fallback": gen["allow_template_fallback"],
+        "allow_heuristic_fallback": gen["allow_heuristic_fallback"],
+        "fail_on_fallback": gen["fail_on_fallback"],
     }
 
     manager = OrchestrationManager(paths["jobs_dir"])
@@ -137,6 +146,7 @@ def _run_queue(args: argparse.Namespace, cfg: dict) -> None:
 
     print(f"Submitted generation job: {job.job_id}")
     print(f"  goal:    {args.goal}")
+    print("  spec_format: v2")
     print(f"  backend: {payload['backend']}")
     print(f"  mode:    {payload['mode']}")
     print(f"  queue:   {paths['jobs_dir']}")
@@ -151,6 +161,9 @@ def main() -> None:
         level=getattr(logging, app.get("log_level", "INFO")),
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+
+    if args.spec_format not in (None, "v2"):
+        raise ValueError("Only spec_format='v2' is supported")
 
     if args.direct:
         _run_direct(args, cfg)

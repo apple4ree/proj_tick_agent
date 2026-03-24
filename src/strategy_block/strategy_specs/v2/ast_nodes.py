@@ -6,7 +6,9 @@ field, keeping the spec format JSON-friendly and declarative.
 Supported node types:
 - ``const``       — literal numeric value
 - ``feature``     — runtime feature lookup
-- ``comparison``  — binary comparison (feature op threshold)
+- ``state_var``   — runtime strategy state lookup (Phase 3)
+- ``position_attr`` — runtime position-context lookup (Phase 3 stabilization)
+- ``comparison``  — binary comparison (expr op threshold)
 - ``all``         — logical AND over children
 - ``any``         — logical OR over children
 - ``not``         — logical negation
@@ -37,8 +39,16 @@ VALID_ROLLING_METHODS: frozenset[str] = frozenset({
 
 # Known node type tags
 VALID_NODE_TYPES: frozenset[str] = frozenset({
-    "const", "feature", "comparison", "all", "any", "not", "cross",
+    "const", "feature", "state_var", "position_attr", "comparison", "all", "any", "not", "cross",
     "lag", "rolling", "persist",
+})
+
+VALID_POSITION_ATTR_NAMES: frozenset[str] = frozenset({
+    "holding_ticks",
+    "entry_price",
+    "position_size",
+    "position_side",
+    "unrealized_pnl_bps",
 })
 
 
@@ -91,31 +101,78 @@ class FeatureExpr(ExprNode):
         return {self.name}
 
 
+@dataclass
+class StateVarExpr(ExprNode):
+    """Runtime strategy state variable lookup (Phase 3)."""
+    name: str = ""
+
+    def __init__(self, name: str = ""):
+        super().__init__(type="state_var")
+        self.name = name
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"type": "state_var", "name": self.name}
+
+    def collect_features(self) -> set[str]:
+        return set()
+
+
+@dataclass
+class PositionAttrExpr(ExprNode):
+    """Runtime position attribute lookup (Phase 3 stabilization)."""
+    name: str = ""
+
+    def __init__(self, name: str = ""):
+        super().__init__(type="position_attr")
+        self.name = name
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"type": "position_attr", "name": self.name}
+
+    def collect_features(self) -> set[str]:
+        return set()
+
+
 # ── Condition nodes ───────────────────────────────────────────────────
 
 @dataclass
 class ComparisonExpr(ExprNode):
-    """Binary comparison: ``feature op threshold``."""
+    """Binary comparison: ``left_or_feature op threshold``.
+
+    Backward compatibility:
+    - Legacy form uses ``feature``.
+    - Phase 3 form can use ``left`` as an arbitrary float expression,
+      e.g. ``left=StateVarExpr("loss_streak")``.
+    """
     feature: str = ""
     op: str = ">"
     threshold: float = 0.0
+    left: ExprNode | None = None
 
-    def __init__(self, feature: str = "", op: str = ">", threshold: float = 0.0):
+    def __init__(self, feature: str = "", op: str = ">", threshold: float = 0.0,
+                 left: ExprNode | None = None):
         super().__init__(type="comparison")
         self.feature = feature
         self.op = op
         self.threshold = threshold
+        self.left = left
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "type": "comparison",
-            "feature": self.feature,
             "op": self.op,
             "threshold": self.threshold,
         }
+        if self.left is not None:
+            d["left"] = self.left.to_dict()
+        else:
+            d["feature"] = self.feature
+        return d
 
     def collect_features(self) -> set[str]:
-        return {self.feature}
+        if self.left is not None:
+            return self.left.collect_features()
+        return {self.feature} if self.feature else set()
 
 
 @dataclass
@@ -295,9 +352,20 @@ def expr_from_dict(d: dict[str, Any]) -> ExprNode:
         return ConstExpr(value=d["value"])
     elif node_type == "feature":
         return FeatureExpr(name=d["name"])
+    elif node_type == "state_var":
+        return StateVarExpr(name=d["name"])
+    elif node_type == "position_attr":
+        return PositionAttrExpr(name=d["name"])
     elif node_type == "comparison":
-        return ComparisonExpr(feature=d["feature"], op=d["op"],
-                              threshold=d["threshold"])
+        left = None
+        if "left" in d and d["left"] is not None:
+            left = expr_from_dict(d["left"])
+        return ComparisonExpr(
+            feature=d.get("feature", ""),
+            op=d["op"],
+            threshold=d["threshold"],
+            left=left,
+        )
     elif node_type == "all":
         return AllExpr(children=[expr_from_dict(c) for c in d["children"]])
     elif node_type == "any":

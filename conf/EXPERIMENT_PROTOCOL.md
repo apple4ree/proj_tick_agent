@@ -1,100 +1,129 @@
-# 표준 실험 프로토콜
+# Experiment Protocol (v2-only)
 
-## 개요
+이 문서는 StrategySpec v2 실험 실행 규약이다. 목적은 결과 재현성과 산출물 관리를 일관되게 유지하는 것이다.
 
-전략 생성 파이프라인으로 생성된 전략을 체계적으로 평가합니다.
-주요 실험 축: **종목(Universe)** × **Latency**.
+## 1) Scope
 
-## 실험 워크플로우
+- 대상: generation -> review -> backtest (single/universe) -> report
+- 기본 spec 형식: StrategySpec v2
+- smoke는 배선 확인용이며 최종 품질 판단은 stronger validation에서 수행
 
-### 1. 전략 생성 (Job 제출)
+## 2) Config/Profile Rules
+
+기본 설정 병합 순서:
+
+1. `conf/app.yaml`
+2. `conf/paths.yaml`
+3. `conf/generation.yaml`
+4. `conf/backtest_base.yaml`
+5. `conf/backtest_worker.yaml`
+6. `conf/workers.yaml`
+7. `conf/profiles/<profile>.yaml`
+8. `--config <override.yaml>`
+
+운영 규칙:
+
+- 빠른 점검: `--profile smoke`
+- 일반 개발 검증: `--profile dev`
+- 긴 회귀/운영 유사 점검: `--profile prod` 또는 명시 override
+
+## 3) Naming and Tracking
+
+실험 실행 시 다음을 기록한다.
+
+- goal 텍스트
+- spec 경로 (example/generated/registry 구분 포함)
+- symbol/date/profile/config override
+- backend/mode (template/openai, live/mock/replay)
+- 실행 시각(UTC)과 git revision
+
+권장 실행 단위:
+
+- 하나의 목표(goal)당 하나의 명시적 run 메모
+- run 메모에는 command line과 출력 경로를 함께 기록
+
+## 4) Artifact Management
+
+- `outputs/`: 백테스트/요약 등 실행 산출물
+- `experiments/`: 반복 실험 결과 묶음
+- `checkpoints/`: 학습 산출물
+
+원칙:
+
+- 코드와 산출물은 분리 관리
+- 큰 산출물은 주기적으로 정리
+- 재현에 필요 없는 임시 산출물은 보관하지 않음
+
+## 5) Spec Source Separation
+
+- `strategies/examples/`: reference-only 샘플
+- 생성 직후 spec: generate 결과 파일 (`GENERATED_SPEC`)
+- runtime registry spec: `strategies/` 아래 승인/버전 관리 대상
+
+실험 시 spec 출처를 반드시 태깅한다.
+
+- `source=example`
+- `source=generated`
+- `source=registry`
+
+## 6) Validation Policy
+
+smoke (quick wiring check):
+
+- CLI/help 경로 정상 여부
+- generate/review/backtest 최소 경로 동작
+- 짧은 입력으로 빠른 실행
+
+stronger validation:
+
+- fill/latency/impact가 실제 발생하는 통합 경로
+- profile/config 조합 회귀
+- worker 경로 포함 점검
+
+판정 규칙:
+
+- smoke pass만으로 품질 승인하지 않음
+- stronger pass를 릴리즈/보고 기준으로 사용
+
+## 7) Reproducibility Minimum
+
+최소 재현 정보:
+
+- spec 파일 원본
+- 실행 명령 전체
+- profile + override config
+- 데이터 기간/심볼 범위
+- 출력 결과 경로
+
+동일 조건 재실행 시 결과 차이가 크면:
+
+1. config diff 확인
+2. spec diff 확인
+3. 데이터 구간/입력 파일 차이 확인
+4. 코드 revision 차이 확인
+
+## 8) Recommended Command Patterns
+
+단일 종목 smoke:
 
 ```bash
-cd /home/dgu/tick/proj_rl_agent
-
-# Shell 런처 (권장)
-./scripts/submit_generation_job.sh "Order imbalance alpha"
-
-# 또는 직접 Python
-PYTHONPATH=src python scripts/generate_strategy.py \
-    --goal "Order imbalance alpha"
-```
-
-### 2. 전략 검토
-
-```bash
-PYTHONPATH=src python scripts/review_strategy.py \
-    strategies/imbalance_momentum_v1.0.json
-```
-
-### 3. 단일 종목 백테스트
-
-```bash
-# Job 제출 (권장)
-./scripts/submit_backtest_job.sh \
-    --strategy imbalance_momentum --version 1.0 \
-    --symbol 005930 --start-date 2026-03-13
-
-# 또는 직접 실행
 PYTHONPATH=src python scripts/backtest.py \
-    --spec strategies/imbalance_momentum_v1.0.json \
-    --symbol 005930 --start-date 20260313
+  --spec strategies/examples/stateful_cooldown_momentum_v2.0.json \
+  --symbol 005930 --start-date 20260313 --profile smoke
 ```
 
-### 4. Universe 백테스트
+통합 stronger:
 
 ```bash
-PYTHONPATH=src python scripts/backtest_strategy_universe.py \
-    --spec strategies/imbalance_momentum_v1.0.json \
-    --data-dir /home/dgu/tick/open-trading-api/data/realtime/H0STASP0 \
-    --start-date 20260313
+./scripts/run_validation_tiers.sh stronger
 ```
 
-내부 기본값: 전체 종목, latency sweep [0,50,100,500,1000]ms.
-
-### 5. 결과 집계
+end-to-end:
 
 ```bash
-PYTHONPATH=src python scripts/summarize_universe_results.py \
-    --results outputs/universe_backtest/imbalance_momentum/universe_results.csv
+bash scripts/run_generate_review_backtest.sh \
+  --goal "microstructure momentum" \
+  --symbol 005930 \
+  --start-date 20260313 \
+  --profile dev
 ```
-
-## Baseline 설정 참고
-
-`conf/backtest_base.yaml`에 백테스트 공통 기본 파라미터가 정의되어 있습니다
-(config stack의 일부로 자동 로드됨):
-
-| 카테고리 | 파라미터 | 값 | 근거 |
-|----------|----------|-----|------|
-| **데이터** | symbol | 005930 | 삼성전자 (KRX 대표 종목) |
-| | resample | 1s | 1초 캔들 (틱 노이즈 감소) |
-| **포트폴리오** | initial_cash | 1억 KRW | 기관 기준 |
-| | seed | 42 | 재현성 |
-| **수수료** | type | krx | KRX 실제 수수료 구조 |
-| **충격** | type | linear | 선형 충격 모델 |
-| **분할** | algo | TWAP | 시간 가중 분할 |
-| **배치** | style | spread_adaptive | 스프레드 적응형 |
-
-## 결과 해석 메트릭
-
-| 메트릭 | 설명 | 좋은 값 |
-|--------|------|---------|
-| sharpe_ratio | 위험 조정 수익률 | > 1.0 |
-| net_pnl | 총 손익 (KRW) | > 0 |
-| fill_rate | 체결률 | > 0.8 |
-| n_fills | 체결 수 | > 0 |
-| max_drawdown | 최대 낙폭 | < 0.1 |
-| is_bps | Implementation Shortfall (bps) | 낮을수록 좋음 |
-
-## 실험 설계 원칙
-
-1. **Universe 평가**: 단일 종목 과적합 방지를 위해 전종목 백테스트
-2. **Latency 축**: 0, 50, 100, 500, 1000ms — 실전 배포 판단 기준
-3. **동일 시드**: seed=42 고정으로 확률적 요소 통제
-4. **통계적 유의성**: Harvey, Liu & Zhu (2016)의 t > 3.0 threshold 적용
-
-## 주의사항
-
-1. **실패 처리**: Universe 백테스트가 전부 실패하면 non-zero exit code로 종료됩니다.
-2. **재현성**: 동일 설정으로 동일 결과가 나오는지 확인하세요.
-3. **실패 리포트**: `failed_runs.json`에 실패 원인이 저장됩니다.

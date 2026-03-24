@@ -59,38 +59,7 @@ VALID_TRANSITIONS: dict[StrategyStatus, set[StrategyStatus]] = {
 
 @dataclass
 class StrategyMetadata:
-    """Metadata record stored alongside each strategy spec.
-
-    Attributes
-    ----------
-    strategy_id : str
-        Unique identifier ``<name>_v<version>``.
-    name : str
-        Human-readable strategy name.
-    version : str
-        Semantic version string.
-    status : StrategyStatus
-        Current lifecycle status.
-    created_at : str
-        ISO-8601 creation timestamp.
-    generation_backend : str
-        Which LLM / pipeline backend generated the spec (e.g. ``"gpt-4o"``,
-        ``"claude-opus-4-6"``).
-    generation_mode : str
-        Generation mode: ``"multi_agent"``, ``"template"``, ``"manual"``, etc.
-    static_review_passed : bool
-        Whether static review validation has passed.
-    approved_for_backtest : bool
-        Whether this version is approved for backtesting.
-    approved_for_live : bool
-        Whether this version is approved for live trading.
-    spec_path : str
-        Relative path to the spec JSON file.
-    trace_path : str
-        Relative path to the generation trace file (may be empty).
-    extra : dict
-        Arbitrary extra fields.
-    """
+    """Metadata record stored alongside each strategy spec."""
 
     strategy_id: str
     name: str
@@ -102,7 +71,7 @@ class StrategyMetadata:
     static_review_passed: bool = False
     approved_for_backtest: bool = False
     approved_for_live: bool = False
-    spec_format: str = "v1"  # "v1" or "v2"
+    spec_format: str = "v2"  # StrategySpec v2 only
     spec_path: str = ""
     trace_path: str = ""
     extra: dict[str, Any] = field(default_factory=dict)
@@ -112,6 +81,8 @@ class StrategyMetadata:
             self.created_at = datetime.now(timezone.utc).isoformat()
         if isinstance(self.status, str):
             self.status = StrategyStatus(self.status)
+        if self.spec_format != "v2":
+            raise ValueError("spec_format must be 'v2', got " + repr(self.spec_format))
 
     # -- serialization --------------------------------------------------------
 

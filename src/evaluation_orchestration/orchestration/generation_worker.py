@@ -5,10 +5,9 @@ Worker that polls generate_strategy jobs from the file queue, runs
 StrategyGenerator, and persists results to the registry.
 
 The generator enforces the static review hard gate internally: a returned
-spec is guaranteed to have passed review.  If review fails (and template
-fallback also fails), the generator raises ``StaticReviewError`` and the
-worker marks the job as **failed** — no invalid spec enters the registry
-in an executable state.
+spec is guaranteed to have passed review. If review fails (or fallback policy
+blocks degraded generation), the worker marks the job as **failed** — no
+invalid spec enters the registry in an executable state.
 """
 from __future__ import annotations
 
@@ -19,8 +18,8 @@ from pathlib import Path
 from typing import Any
 
 from evaluation_orchestration.orchestration.file_queue import FileQueue
-from evaluation_orchestration.orchestration.models import Job, JobType, JobStatus
-from strategy_block.strategy_generation.generator import StrategyGenerator, StaticReviewError
+from evaluation_orchestration.orchestration.models import Job, JobType
+from strategy_block.strategy_generation.generator import StrategyGenerator
 from strategy_block.strategy_registry.registry import StrategyRegistry
 from strategy_block.strategy_registry.models import StrategyStatus
 
@@ -28,17 +27,7 @@ logger = logging.getLogger(__name__)
 
 
 class GenerationWorker:
-    """Processes ``generate_strategy`` jobs from a :class:`FileQueue`.
-
-    Parameters
-    ----------
-    queue : FileQueue
-        Job queue to poll.
-    registry : StrategyRegistry
-        Where to persist generated specs and metadata.
-    trace_dir : str | Path
-        Directory for generation trace JSON files.
-    """
+    """Processes ``generate_strategy`` jobs from a :class:`FileQueue`."""
 
     def __init__(
         self,
@@ -51,14 +40,8 @@ class GenerationWorker:
         self.trace_dir = Path(trace_dir)
         self.trace_dir.mkdir(parents=True, exist_ok=True)
 
-    # -- public API -----------------------------------------------------------
-
     def run_once(self) -> Job | None:
-        """Dequeue and process a single ``generate_strategy`` job.
-
-        Returns the finished :class:`Job` (succeeded or failed), or ``None``
-        if the queue was empty.
-        """
+        """Dequeue and process a single ``generate_strategy`` job."""
         job = self.queue.dequeue(job_type=JobType.GENERATE_STRATEGY)
         if job is None:
             return None
@@ -75,33 +58,44 @@ class GenerationWorker:
         except KeyboardInterrupt:
             logger.info("Generation worker stopped")
 
-    # -- internal -------------------------------------------------------------
+    def _trace_flags(self, trace: dict[str, Any]) -> dict[str, Any]:
+        fallback = dict(trace.get("fallback") or {})
+        events = list(fallback.get("events") or [])
+        provenance = dict(trace.get("provenance") or {})
+        return {
+            "generation_outcome": trace.get("generation_outcome", "unknown"),
+            "static_review_passed": bool(trace.get("static_review_passed", False)),
+            "fallback_used": bool(trace.get("fallback_used", False) or fallback.get("used", False)),
+            "fallback_count": int(fallback.get("count", len(events))),
+            "fallback_events": events,
+            "generation_class": provenance.get("generation_class", "unknown"),
+            "requested_backend": provenance.get("requested_backend", ""),
+            "effective_backend": provenance.get("effective_backend", ""),
+            "requested_mode": provenance.get("requested_mode", ""),
+            "effective_mode": provenance.get("effective_mode", ""),
+            "spec_format": provenance.get("spec_format", ""),
+        }
 
     def _process(self, job: Job) -> Job:
         """Execute a single generation job end-to-end."""
         payload = job.payload
         try:
-            # Generator enforces static review hard gate:
-            # returns only review-passed specs, raises on failure.
             spec, trace = self._generate(payload)
 
-            # Persist trace
             trace_path = self._save_trace(spec.name, spec.version, trace)
 
-            # Persist spec + metadata to registry
             spec_path = self.registry.save_spec(
                 spec,
                 generation_backend=payload.get("backend", "template"),
                 generation_mode=payload.get("mode", "live"),
                 trace_path=str(trace_path),
+                extra={"generation": self._trace_flags(trace)},
             )
 
-            # Mark review passed (guaranteed by generator)
             meta = self.registry.get_metadata(spec.name, spec.version)
             meta.static_review_passed = True
             meta.save(self.registry._meta_path(spec.name, spec.version))
 
-            # Status transition: DRAFT → REVIEWED (→ APPROVED if auto)
             self.registry.update_status(
                 spec.name, spec.version, StrategyStatus.REVIEWED,
             )
@@ -112,16 +106,16 @@ class GenerationWorker:
 
             self.queue.mark_succeeded(job.job_id, result_path=str(spec_path))
             logger.info(
-                "Job %s succeeded: %s v%s (outcome=%s)",
+                "Job %s succeeded: %s v%s (outcome=%s fallback=%s)",
                 job.job_id,
                 spec.name,
                 spec.version,
                 trace.get("generation_outcome", "success"),
+                trace.get("fallback_used", False),
             )
             return self.queue.load_job(job.job_id)
 
         except Exception as exc:
-            # Save trace from StaticReviewError for audit
             trace = getattr(exc, "trace", None)
             if trace:
                 self._save_trace("_failed", job.job_id, trace)
@@ -137,6 +131,10 @@ class GenerationWorker:
             backend=payload.get("backend", "template"),
             mode=payload.get("mode", "live"),
             replay_path=payload.get("replay_path"),
+            spec_format=payload.get("spec_format", "v2"),
+            allow_template_fallback=payload.get("allow_template_fallback", True),
+            allow_heuristic_fallback=payload.get("allow_heuristic_fallback", True),
+            fail_on_fallback=payload.get("fail_on_fallback", False),
         )
         return generator.generate(
             research_goal=payload.get("research_goal", ""),

@@ -1,18 +1,11 @@
 """Compiler v2 — converts StrategySpecV2 into an executable Strategy.
 
-The compiled strategy implements the Strategy ABC so it can plug directly
-into the existing PipelineRunner backtest engine.
-
-Evaluation order per tick:
-1. Extract features from MarketState
-2. Record feature history (for lag/rolling/persist)
-3. Check do_not_trade_when (execution policy)
-4. Check preconditions (all must pass)
-5. Select active regime (if regimes defined)
-6. Check exit policies (if in a position)
-7. Check entry policies (if not blocked by cooldown/constraints)
-8. Apply risk policy (inventory cap, position sizing)
-9. Emit Signal with execution hints in tags
+Phase 3 semantics:
+1. Extract features + update history
+2. If in-position: evaluate exits first (entry gates never block exits)
+3. If flat: apply entry gating (do_not_trade/preconditions/state guards/regime)
+4. Apply degradation + entry policies
+5. Emit signal with execution hints (+ adaptation overrides)
 """
 from __future__ import annotations
 
@@ -25,9 +18,11 @@ from strategy_block.strategy_specs.v2.schema_v2 import (
     EntryPolicyV2,
     ExitPolicyV2,
     ExitRuleV2,
-    RegimeV2,
+    RiskPolicyV2,
+    ExecutionPolicyV2,
 )
 from .runtime_v2 import RuntimeStateV2, evaluate_bool, evaluate_float
+from .features import BUILTIN_FEATURES, extract_builtin_features
 
 if TYPE_CHECKING:
     from data.layer0_data.market_state import MarketState
@@ -42,6 +37,7 @@ class CompiledStrategyV2(Strategy):
     def __init__(self, spec: StrategySpecV2) -> None:
         self._spec = spec
         self._states: dict[str, RuntimeStateV2] = {}
+
         # Build lookup maps for regime-based policy routing
         self._entry_by_name: dict[str, EntryPolicyV2] = {
             ep.name: ep for ep in spec.entry_policies
@@ -49,6 +45,15 @@ class CompiledStrategyV2(Strategy):
         self._exit_by_name: dict[str, ExitPolicyV2] = {
             xp.name: xp for xp in spec.exit_policies
         }
+
+        self._state_defaults: dict[str, float] = {}
+        self._state_events: dict[str, list] = {}
+        if spec.state_policy is not None:
+            self._state_defaults = {
+                k: float(v) for k, v in spec.state_policy.vars.items()
+            }
+            for event in spec.state_policy.events:
+                self._state_events.setdefault(event.on, []).append(event)
 
     @property
     def name(self) -> str:
@@ -59,12 +64,14 @@ class CompiledStrategyV2(Strategy):
 
     def _get_state(self, symbol: str) -> RuntimeStateV2:
         if symbol not in self._states:
-            self._states[symbol] = RuntimeStateV2()
+            self._states[symbol] = RuntimeStateV2(
+                state_vars=dict(self._state_defaults)
+            )
         return self._states[symbol]
 
-    def _build_exec_tags(self) -> dict[str, object]:
-        """Build execution hint tags from execution_policy."""
-        xp = self._spec.execution_policy
+    def _build_exec_tags(self, policy: ExecutionPolicyV2 | None = None) -> dict[str, object]:
+        """Build execution hint tags from execution policy."""
+        xp = policy if policy is not None else self._spec.execution_policy
         if xp is None:
             return {}
         tags: dict[str, object] = {
@@ -76,11 +83,122 @@ class CompiledStrategyV2(Strategy):
             tags["max_reprices"] = xp.max_reprices
         return tags
 
+    def _apply_execution_overrides(self, tags: dict[str, object],
+                                   policy: ExecutionPolicyV2 | None) -> None:
+        if policy is None:
+            return
+        tags["placement_mode"] = policy.placement_mode
+        if policy.cancel_after_ticks > 0:
+            tags["cancel_after_ticks"] = policy.cancel_after_ticks
+        else:
+            tags.pop("cancel_after_ticks", None)
+        if policy.max_reprices > 0:
+            tags["max_reprices"] = policy.max_reprices
+        else:
+            tags.pop("max_reprices", None)
+
+    def _apply_execution_adaptation_rules(
+        self,
+        policy: ExecutionPolicyV2 | None,
+        rt: RuntimeStateV2,
+        features: dict[str, float],
+        prev_features: dict[str, float],
+        tags: dict[str, object],
+    ) -> None:
+        """Apply hint-level execution adaptation rules on entry path only."""
+        if policy is None:
+            return
+
+        for rule in policy.adaptation_rules:
+            if not evaluate_bool(rule.condition, features, prev_features, rt):
+                continue
+
+            ov = rule.override
+            if ov.placement_mode is not None:
+                tags["placement_mode"] = ov.placement_mode
+            if ov.cancel_after_ticks is not None:
+                if ov.cancel_after_ticks > 0:
+                    tags["cancel_after_ticks"] = ov.cancel_after_ticks
+                else:
+                    tags.pop("cancel_after_ticks", None)
+            if ov.max_reprices is not None:
+                if ov.max_reprices > 0:
+                    tags["max_reprices"] = ov.max_reprices
+                else:
+                    tags.pop("max_reprices", None)
+
+    def _evaluate_state_guards(
+        self,
+        rt: RuntimeStateV2,
+        features: dict[str, float],
+        prev_features: dict[str, float],
+    ) -> bool:
+        """Return True when entry must be blocked by state guards."""
+        sp = self._spec.state_policy
+        if sp is None:
+            return False
+
+        for guard in sp.guards:
+            if guard.effect != "block_entry":
+                continue
+            if evaluate_bool(guard.condition, features, prev_features, rt):
+                return True
+        return False
+
+    def _apply_state_event(self, rt: RuntimeStateV2, event_name: str) -> None:
+        """Apply state updates for a named runtime event."""
+        events = self._state_events.get(event_name, [])
+        if not events:
+            return
+
+        for event in events:
+            for upd in event.updates:
+                if upd.var not in rt.state_vars:
+                    rt.state_vars[upd.var] = self._state_defaults.get(upd.var, 0.0)
+
+                if upd.op == "set":
+                    rt.state_vars[upd.var] = float(upd.value)
+                elif upd.op == "increment":
+                    rt.state_vars[upd.var] += float(upd.value)
+                elif upd.op == "reset":
+                    rt.state_vars[upd.var] = self._state_defaults.get(upd.var, 0.0)
+
+    def _apply_degradation_rules(
+        self,
+        rt: RuntimeStateV2,
+        features: dict[str, float],
+        prev_features: dict[str, float],
+        risk: RiskPolicyV2,
+    ) -> tuple[bool, float, float]:
+        """Return (allow_entry, strength_scale, max_position_scale)."""
+        allow_entry = True
+        strength_scale = 1.0
+        max_position_scale = 1.0
+
+        for rule in risk.degradation_rules:
+            if not evaluate_bool(rule.condition, features, prev_features, rt):
+                continue
+
+            action = rule.action
+            if action.type == "block_new_entries":
+                allow_entry = False
+            elif action.type == "scale_strength":
+                strength_scale *= max(0.0, float(action.factor))
+            elif action.type == "scale_max_position":
+                max_position_scale *= max(0.0, float(action.factor))
+
+        return allow_entry, strength_scale, max_position_scale
+
+    def _flatten_position(self, rt: RuntimeStateV2) -> None:
+        rt.position_side = ""
+        rt.position_size = 0.0
+        rt.entry_tick = -1
+        rt.entry_price = 0.0
+        rt.trailing_high = 0.0
+        rt.trailing_low = float("inf")
+
     def generate_signal(self, state: "MarketState") -> "Signal | None":
         from execution_planning.layer1_signal import Signal
-        # Reuse v1 feature extraction (same contract)
-        from strategy_block.strategy_compiler.compiler import CompiledStrategy
-
         if state.lob.mid_price is None:
             return None
 
@@ -90,51 +208,39 @@ class CompiledStrategyV2(Strategy):
         rt.tick_count += 1
         tick = rt.tick_count
 
-        features = CompiledStrategy._extract_features(
-            CompiledStrategy.__new__(CompiledStrategy), state
-        )
+        features = extract_builtin_features(state)
 
         prev_features = rt.prev_features
 
         # Record feature history for lag/rolling/persist
         rt.record_features(features)
 
-        # Build base tags including execution hints
-        exec_tags = self._build_exec_tags()
+        # Base execution tags from top-level execution policy
+        exec_tags = self._build_exec_tags(self._spec.execution_policy)
 
-        # 0. Check do_not_trade_when (execution policy)
-        xp = self._spec.execution_policy
-        if xp and xp.do_not_trade_when is not None:
-            if evaluate_bool(xp.do_not_trade_when, features, prev_features, rt):
-                rt.prev_features = features
-                return None
-
-        # 1. Check preconditions
-        for pc in self._spec.preconditions:
-            if not evaluate_bool(pc.condition, features, prev_features, rt):
-                rt.prev_features = features
-                return None
-
-        # 2. Select active regime (if regimes defined)
-        active_entries, active_exits, active_risk = self._select_regime(
-            rt, features, prev_features, exec_tags
-        )
-
-        # 3. Check exit policies (if in a position)
+        # Exit-first semantics: in-position path never blocked by entry gates.
         if rt.position_side:
+            _, active_exits, _, _, _ = self._select_regime(
+                rt, features, prev_features, exec_tags, for_entry=False
+            )
             exit_signal = self._evaluate_exits(
                 rt, features, prev_features, mid, tick, active_exits
             )
             if exit_signal is not None:
-                score = -1.0 if rt.position_side == "long" else 1.0
+                current_side = rt.position_side
+                score = -1.0 if current_side == "long" else 1.0
                 exit_type = exit_signal
-                # Reset position state
-                rt.position_side = ""
-                rt.position_size = 0.0
-                rt.entry_tick = -1
-                rt.entry_price = 0.0
-                rt.trailing_high = 0.0
-                rt.trailing_low = float("inf")
+
+                # Evaluate realized PnL sign before flattening.
+                pnl = (mid - rt.entry_price) if current_side == "long" else (rt.entry_price - mid)
+                if pnl > 0:
+                    self._apply_state_event(rt, "on_exit_profit")
+                elif pnl < 0:
+                    self._apply_state_event(rt, "on_exit_loss")
+
+                self._flatten_position(rt)
+                self._apply_state_event(rt, "on_flatten")
+
                 rt.prev_features = features
                 tags = {"strategy": self.name, "exit_type": exit_type,
                         "spec_format": "v2"}
@@ -150,13 +256,52 @@ class CompiledStrategyV2(Strategy):
                     is_valid=True,
                 )
 
-            # Update trailing prices
+            # No exit: keep position open and update trailing prices.
             if rt.position_side == "long":
                 rt.trailing_high = max(rt.trailing_high, mid)
             else:
                 rt.trailing_low = min(rt.trailing_low, mid)
 
-        # 4. Check entry policies
+            rt.prev_features = features
+            return None
+
+        # Entry path only (flat state)
+
+        # 1) do_not_trade_when gating
+        xp = self._spec.execution_policy
+        if xp and xp.do_not_trade_when is not None:
+            if evaluate_bool(xp.do_not_trade_when, features, prev_features, rt):
+                rt.prev_features = features
+                return None
+
+        # 2) Preconditions
+        for pc in self._spec.preconditions:
+            if not evaluate_bool(pc.condition, features, prev_features, rt):
+                rt.prev_features = features
+                return None
+
+        # 3) State guards
+        if self._evaluate_state_guards(rt, features, prev_features):
+            rt.prev_features = features
+            return None
+
+        # 4) Regime routing (flat no-match => no entry)
+        active_entries, _, active_risk, active_exec_policy, regime_matched = self._select_regime(
+            rt, features, prev_features, exec_tags, for_entry=True
+        )
+        if self._spec.regimes and not regime_matched:
+            rt.prev_features = features
+            return None
+
+        # 5) Risk degradation rules (entry-only)
+        allow_entry, strength_scale, max_pos_scale = self._apply_degradation_rules(
+            rt, features, prev_features, active_risk
+        )
+        if not allow_entry:
+            rt.prev_features = features
+            return None
+
+        # 6) Entry policy evaluation
         entry_result = self._evaluate_entries(
             rt, features, prev_features, tick, active_entries
         )
@@ -165,15 +310,9 @@ class CompiledStrategyV2(Strategy):
             return None
 
         entry_name, side, strength = entry_result
+        strength *= strength_scale
 
-        # 5. Apply risk policy — inventory cap
-        rp = active_risk
-        if rt.position_side:
-            if abs(rt.position_size) >= rp.inventory_cap:
-                rt.prev_features = features
-                return None
-
-        # 6. Compute score and size
+        # 7) Compute score
         score = strength if side == "long" else -strength
         score = max(-1.0, min(1.0, score))
 
@@ -181,25 +320,48 @@ class CompiledStrategyV2(Strategy):
             rt.prev_features = features
             return None
 
-        # Update position state
-        if not rt.position_side or (side != rt.position_side):
-            rt.entry_price = mid
-            rt.entry_tick = tick
-            rt.trailing_high = mid
-            rt.trailing_low = mid
-        rt.position_side = side
-        rt.position_size = abs(score) * rp.position_sizing.max_size
+        # 8) Apply degraded sizing caps
+        effective_max_position = max(0.0, active_risk.max_position * max_pos_scale)
+        effective_max_size = max(0.0, active_risk.position_sizing.max_size * max_pos_scale)
+        if effective_max_position <= 0.0 or effective_max_size <= 0.0:
+            rt.prev_features = features
+            return None
 
-        # Apply cooldown
+        position_size = abs(score) * effective_max_size
+        position_size = min(position_size, effective_max_position)
+        position_size = min(position_size, float(active_risk.inventory_cap))
+        if position_size <= 0.0:
+            rt.prev_features = features
+            return None
+
+        # Update position state
+        rt.entry_price = mid
+        rt.entry_tick = tick
+        rt.trailing_high = mid
+        rt.trailing_low = mid
+        rt.position_side = side
+        rt.position_size = position_size
+
+        # Apply cooldown from the triggering entry policy
         for ep in self._spec.entry_policies:
             if ep.name == entry_name and ep.constraints.cooldown_ticks > 0:
                 rt.cooldown_until = tick + ep.constraints.cooldown_ticks
+                break
+
+        # Entry event
+        self._apply_state_event(rt, "on_entry")
+
+        # 9) Execution adaptation rules (entry-only)
+        entry_exec_tags = dict(exec_tags)
+        self._apply_execution_adaptation_rules(
+            active_exec_policy, rt, features, prev_features, entry_exec_tags
+        )
 
         rt.prev_features = features
 
         tags = {"strategy": self.name, "entry_policy": entry_name,
                 "spec_format": "v2"}
-        tags.update(exec_tags)
+        tags.update(entry_exec_tags)
 
         return Signal(
             timestamp=state.timestamp,
@@ -218,52 +380,59 @@ class CompiledStrategyV2(Strategy):
         features: dict[str, float],
         prev_features: dict[str, float],
         exec_tags: dict[str, object],
-    ) -> tuple[list[EntryPolicyV2], list[ExitPolicyV2], object]:
-        """Select the active regime and return (entries, exits, risk).
+        *,
+        for_entry: bool,
+    ) -> tuple[list[EntryPolicyV2], list[ExitPolicyV2], RiskPolicyV2,
+               ExecutionPolicyV2 | None, bool]:
+        """Select active regime and return policy context.
 
-        If no regimes are defined, returns all policies (Phase 1 behavior).
-        If regimes are defined but none match, returns empty lists (no trade).
+        Returns: (entries, exits, risk, execution_policy, matched)
+
+        Regime no-match semantics:
+        - for_entry=True: no entry (empty entries)
+        - for_entry=False: exits fall back to global exit policies
         """
+        default_exec = self._spec.execution_policy
+
         if not self._spec.regimes:
-            # No regimes: use all policies (Phase 1 fallback)
             return (
                 self._spec.entry_policies,
                 self._spec.exit_policies,
                 self._spec.risk_policy,
+                default_exec,
+                True,
             )
 
-        # Sort regimes by priority (lower = higher priority)
         sorted_regimes = sorted(self._spec.regimes, key=lambda r: r.priority)
 
         for regime in sorted_regimes:
-            if evaluate_bool(regime.when, features, prev_features, rt):
-                # Matched — resolve policy refs
-                entries = [
-                    self._entry_by_name[ref]
-                    for ref in regime.entry_policy_refs
-                    if ref in self._entry_by_name
-                ]
-                exits = []
-                if regime.exit_policy_ref and regime.exit_policy_ref in self._exit_by_name:
-                    exits = [self._exit_by_name[regime.exit_policy_ref]]
-                else:
-                    exits = self._spec.exit_policies
+            if not evaluate_bool(regime.when, features, prev_features, rt):
+                continue
 
-                risk = regime.risk_override or self._spec.risk_policy
+            entries = [
+                self._entry_by_name[ref]
+                for ref in regime.entry_policy_refs
+                if ref in self._entry_by_name
+            ]
 
-                # Apply regime-level execution override to tags
-                if regime.execution_override is not None:
-                    eo = regime.execution_override
-                    exec_tags["placement_mode"] = eo.placement_mode
-                    if eo.cancel_after_ticks > 0:
-                        exec_tags["cancel_after_ticks"] = eo.cancel_after_ticks
-                    if eo.max_reprices > 0:
-                        exec_tags["max_reprices"] = eo.max_reprices
+            if regime.exit_policy_ref and regime.exit_policy_ref in self._exit_by_name:
+                exits = [self._exit_by_name[regime.exit_policy_ref]]
+            else:
+                exits = self._spec.exit_policies
 
-                return entries, exits, risk
+            risk = regime.risk_override or self._spec.risk_policy
+            exec_policy = regime.execution_override or default_exec
 
-        # No regime matched — no trading
-        return [], [], self._spec.risk_policy
+            if regime.execution_override is not None:
+                self._apply_execution_overrides(exec_tags, regime.execution_override)
+
+            return entries, exits, risk, exec_policy, True
+
+        if for_entry:
+            return [], [], self._spec.risk_policy, default_exec, False
+
+        # In-position fallback: exits must remain evaluable.
+        return [], self._spec.exit_policies, self._spec.risk_policy, default_exec, False
 
     def _evaluate_entries(
         self,
@@ -276,13 +445,10 @@ class CompiledStrategyV2(Strategy):
         """Evaluate entry policies. Returns (name, side, strength) or None."""
         policies = entries if entries is not None else self._spec.entry_policies
         for ep in policies:
-            # Cooldown check
             if tick < rt.cooldown_until:
                 continue
-            # no_reentry_until_flat check
             if ep.constraints.no_reentry_until_flat and rt.position_side:
                 continue
-            # Same-side position check — don't add to existing same-side position
             if rt.position_side == ep.side:
                 continue
 
@@ -301,9 +467,10 @@ class CompiledStrategyV2(Strategy):
         tick: int,
         exits: list[ExitPolicyV2] | None = None,
     ) -> str | None:
-        """Evaluate exit policies. Returns exit rule name if triggered."""
+        """Evaluate exit policies. Returns exit rule name if flattened."""
+        del mid, tick  # currently unused by declarative exit rules
+
         policies = exits if exits is not None else self._spec.exit_policies
-        # Collect all triggered rules across exit policies, sort by priority
         triggered: list[tuple[int, str, ExitRuleV2]] = []
         for xp in policies:
             for rule in xp.rules:
@@ -313,17 +480,16 @@ class CompiledStrategyV2(Strategy):
         if not triggered:
             return None
 
-        # Take highest priority (lowest number)
         triggered.sort(key=lambda t: t[0])
         _, name, rule = triggered[0]
 
         if rule.action.type == "close_all":
             return name
-        elif rule.action.type == "reduce_position":
+
+        if rule.action.type == "reduce_position":
             rt.position_size *= (1.0 - rule.action.reduce_fraction)
             if rt.position_size < 1.0:
-                return name  # position too small, close entirely
-            # Reduced but not closed — no exit signal
+                return name
             return None
 
         return name
@@ -343,8 +509,7 @@ class StrategyCompilerV2:
 
         # Warn about unknown features
         all_features = spec.collect_all_features()
-        from strategy_block.strategy_compiler.compiler import CompiledStrategy
-        unknown = all_features - CompiledStrategy.BUILTIN_FEATURES
+        unknown = all_features - BUILTIN_FEATURES
         if unknown:
             logger.warning(
                 "V2 strategy '%s' references unknown features %s",

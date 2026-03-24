@@ -45,19 +45,7 @@ def is_openai_available() -> bool:
 
 
 class OpenAIStrategyGenClient:
-    """Thin wrapper around OpenAI API for strategy generation.
-
-    Parameters
-    ----------
-    mode : str
-        "live", "replay", or "mock".
-    model : str
-        Model name for live calls.
-    temperature : float
-        Sampling temperature.
-    replay_path : Path | None
-        Path to replay log for replay mode.
-    """
+    """Thin wrapper around OpenAI API for strategy generation."""
 
     def __init__(
         self,
@@ -74,6 +62,11 @@ class OpenAIStrategyGenClient:
         self._replay_path = Path(replay_path) if replay_path else None
         self._replay_cursor = 0
         self._client: Any = None
+        self.last_query_meta: dict[str, Any] = {
+            "mode": mode,
+            "status": "not_called",
+            "reason": "",
+        }
 
         if mode == "live":
             self._init_live_client()
@@ -118,13 +111,28 @@ class OpenAIStrategyGenClient:
         Returns None on failure after retries.
         """
         if self.mode == "mock":
-            return None  # agents handle mock fallback themselves
+            self.last_query_meta = {
+                "mode": self.mode,
+                "status": "mock_no_call",
+                "reason": "mock mode intentionally bypasses API",
+            }
+            return None
 
         if self.mode == "replay":
-            return self._replay_next(schema)
+            result = self._replay_next(schema)
+            self.last_query_meta = {
+                "mode": self.mode,
+                "status": "replay_hit" if result is not None else "replay_miss",
+                "reason": "",
+            }
+            return result
 
-        # live mode
         if not self.is_available:
+            self.last_query_meta = {
+                "mode": self.mode,
+                "status": "live_unavailable",
+                "reason": "OPENAI client unavailable",
+            }
             return None
 
         for attempt in range(MAX_RETRIES + 1):
@@ -141,12 +149,22 @@ class OpenAIStrategyGenClient:
                 parsed = response.choices[0].message.parsed
                 if parsed is not None:
                     self._record_replay(system_prompt, user_prompt, schema.__name__, parsed)
+                    self.last_query_meta = {
+                        "mode": self.mode,
+                        "status": "live_success",
+                        "reason": "",
+                    }
                     return parsed
                 logger.warning("LLM returned null parsed response (attempt %d)", attempt + 1)
             except Exception as e:
                 logger.warning("OpenAI call failed (attempt %d/%d): %s", attempt + 1, MAX_RETRIES + 1, e)
                 if attempt < MAX_RETRIES:
                     time.sleep(RETRY_DELAY_S)
+        self.last_query_meta = {
+            "mode": self.mode,
+            "status": "live_failed",
+            "reason": "max retries exceeded",
+        }
         return None
 
     def _replay_next(self, schema: type[T]) -> T | None:
@@ -183,3 +201,8 @@ class OpenAIStrategyGenClient:
         """Reset replay log and cursor."""
         self._replay_log.clear()
         self._replay_cursor = 0
+        self.last_query_meta = {
+            "mode": self.mode,
+            "status": "reset",
+            "reason": "",
+        }

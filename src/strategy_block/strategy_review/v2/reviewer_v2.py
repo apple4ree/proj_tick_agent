@@ -1,37 +1,47 @@
 """Static reviewer for StrategySpecV2.
 
 Review categories:
-1. schema                    — structural validation
-2. expression_safety         — valid AST nodes, operators, directions
-3. feature_availability      — features in known set
-4. logical_contradiction     — conflicting conditions in all/any
-5. unreachable_entry         — entries that can never fire
-6. risk_inconsistency        — inventory_cap < max_position, etc.
-7. exit_completeness         — emergency stop present
-8. dead_regime               — regime that can never activate (Phase 2)
-9. regime_reference_integrity — regime refs exist in policies (Phase 2)
-10. execution_risk_mismatch  — execution/risk inconsistency (Phase 2)
-11. latency_structure_warning — large rolling/persist windows (Phase 2)
+1. schema
+2. expression_safety
+3. feature_availability
+4. logical_contradiction
+5. unreachable_entry
+6. risk_inconsistency
+7. exit_completeness
+8. dead_regime
+9. regime_reference_integrity
+10. execution_risk_mismatch
+11. latency_structure_warning
+12. state_reference_integrity          (Phase 3)
+13. state_deadlock                     (Phase 3)
+14. guard_conflict                     (Phase 3)
+15. degradation_conflict               (Phase 3)
+16. exit_semantics_risk                (Phase 3)
+17. position_attr_sanity              (Phase 3 stabilization)
+18. state_event_order_risk            (Phase 3 stabilization)
+19. execution_override_conflict       (Phase 3 stabilization)
+20. regime_exit_coverage              (Phase 3 stabilization)
 """
 from __future__ import annotations
 
 from strategy_block.strategy_specs.v2.schema_v2 import (
     StrategySpecV2,
     ExecutionPolicyV2,
-    VALID_PLACEMENT_MODES,
 )
 from strategy_block.strategy_specs.v2.ast_nodes import (
     ExprNode,
     ComparisonExpr,
     AllExpr,
     AnyExpr,
-    CrossExpr,
-    FeatureExpr,
+    NotExpr,
+    ConstExpr,
+    StateVarExpr,
+    PositionAttrExpr,
     LagExpr,
     RollingExpr,
     PersistExpr,
 )
-from strategy_block.strategy_review.reviewer import (
+from strategy_block.strategy_review.review_common import (
     ReviewIssue,
     ReviewResult,
     KNOWN_FEATURES,
@@ -59,6 +69,17 @@ class StrategyReviewerV2:
         self._check_execution_risk_mismatch(spec, issues)
         self._check_latency_structure_warning(spec, issues)
 
+        # Phase 3 checks
+        self._check_state_reference_integrity(spec, issues)
+        self._check_state_deadlock(spec, issues)
+        self._check_guard_conflict(spec, issues)
+        self._check_degradation_conflict(spec, issues)
+        self._check_exit_semantics_risk(spec, issues)
+        self._check_position_attr_sanity(spec, issues)
+        self._check_state_event_order_risk(spec, issues)
+        self._check_execution_override_conflict(spec, issues)
+        self._check_regime_exit_coverage(spec, issues)
+
         has_error = any(i.severity == "error" for i in issues)
         return ReviewResult(passed=not has_error, issues=issues)
 
@@ -77,7 +98,6 @@ class StrategyReviewerV2:
 
     def _check_expression_safety(self, spec: StrategySpecV2,
                                   issues: list[ReviewIssue]) -> None:
-        """Verify all AST nodes use valid types, ops, and directions."""
         for i, ep in enumerate(spec.entry_policies):
             depth = self._expr_depth(ep.trigger)
             if depth > 10:
@@ -100,6 +120,8 @@ class StrategyReviewerV2:
             return 1 + self._expr_depth(node.child)
         if isinstance(node, PersistExpr):
             return 1 + self._expr_depth(node.expr)
+        if isinstance(node, ComparisonExpr) and node.left is not None:
+            return 1 + self._expr_depth(node.left)
         return 1
 
     # ── 3. Feature availability ───────────────────────────────────
@@ -123,7 +145,6 @@ class StrategyReviewerV2:
 
     def _check_logical_contradiction(self, spec: StrategySpecV2,
                                       issues: list[ReviewIssue]) -> None:
-        """Detect obvious contradictions inside AllExpr nodes."""
         for i, ep in enumerate(spec.entry_policies):
             contradictions = self._find_contradictions(ep.trigger)
             for desc in contradictions:
@@ -144,7 +165,6 @@ class StrategyReviewerV2:
                     suggestion="This precondition may block all signals",
                 ))
 
-        # Phase 2: check regime `when` conditions
         for i, regime in enumerate(spec.regimes):
             contradictions = self._find_contradictions(regime.when)
             for desc in contradictions:
@@ -156,17 +176,14 @@ class StrategyReviewerV2:
                 ))
 
     def _find_contradictions(self, node: ExprNode) -> list[str]:
-        """Find contradictory comparison pairs inside AllExpr nodes."""
         results: list[str] = []
         if isinstance(node, AllExpr):
             comparisons: list[ComparisonExpr] = []
             for child in node.children:
-                if isinstance(child, ComparisonExpr):
+                if isinstance(child, ComparisonExpr) and child.left is None:
                     comparisons.append(child)
-                # Recurse into nested logical nodes
                 results.extend(self._find_contradictions(child))
 
-            # Check pairs for same-feature contradictions
             for a_idx, a in enumerate(comparisons):
                 for b in comparisons[a_idx + 1:]:
                     if a.feature != b.feature:
@@ -178,11 +195,16 @@ class StrategyReviewerV2:
         elif isinstance(node, AnyExpr):
             for child in node.children:
                 results.extend(self._find_contradictions(child))
+        elif isinstance(node, NotExpr):
+            results.extend(self._find_contradictions(node.child))
+        elif isinstance(node, PersistExpr):
+            results.extend(self._find_contradictions(node.expr))
+        elif isinstance(node, ComparisonExpr) and node.left is not None:
+            results.extend(self._find_contradictions(node.left))
 
         return results
 
     def _pair_contradicts(self, a: ComparisonExpr, b: ComparisonExpr) -> str | None:
-        """Check if two comparisons on the same feature are contradictory."""
         if a.op == ">" and b.op == "<" and b.threshold <= a.threshold:
             return (
                 f"'{a.feature} > {a.threshold}' AND '{b.feature} < {b.threshold}' "
@@ -209,7 +231,6 @@ class StrategyReviewerV2:
 
     def _check_unreachable_entry(self, spec: StrategySpecV2,
                                   issues: list[ReviewIssue]) -> None:
-        """Heuristic: warn if cooldown_ticks is abnormally large."""
         for i, ep in enumerate(spec.entry_policies):
             cd = ep.constraints.cooldown_ticks
             if cd > 10000:
@@ -254,7 +275,6 @@ class StrategyReviewerV2:
 
     def _check_exit_completeness(self, spec: StrategySpecV2,
                                   issues: list[ReviewIssue]) -> None:
-        """Warn if there is no emergency/unconditional stop mechanism."""
         has_close_all = False
         for xp in spec.exit_policies:
             for rule in xp.rules:
@@ -279,7 +299,6 @@ class StrategyReviewerV2:
 
     def _check_dead_regime(self, spec: StrategySpecV2,
                             issues: list[ReviewIssue]) -> None:
-        """Detect regimes whose `when` condition is obviously contradictory."""
         for i, regime in enumerate(spec.regimes):
             contradictions = self._find_contradictions(regime.when)
             if contradictions:
@@ -297,7 +316,6 @@ class StrategyReviewerV2:
 
     def _check_regime_reference_integrity(self, spec: StrategySpecV2,
                                            issues: list[ReviewIssue]) -> None:
-        """Check that regime entry/exit refs point to existing policies."""
         entry_names = {ep.name for ep in spec.entry_policies}
         exit_names = {xp.name for xp in spec.exit_policies}
 
@@ -328,7 +346,6 @@ class StrategyReviewerV2:
 
     def _check_execution_risk_mismatch(self, spec: StrategySpecV2,
                                         issues: list[ReviewIssue]) -> None:
-        """Heuristic: passive_only with large positions or aggressive exits."""
         xp = spec.execution_policy
         if xp is None:
             return
@@ -359,34 +376,10 @@ class StrategyReviewerV2:
                     suggestion="Consider reducing max_position or using adaptive placement",
                 ))
 
-        # Check do_not_trade_when vs preconditions for obvious overlap
-        if xp.do_not_trade_when is not None:
-            for i, pc in enumerate(spec.preconditions):
-                # Simple check: same comparison with inverted logic
-                if (isinstance(xp.do_not_trade_when, ComparisonExpr)
-                        and isinstance(pc.condition, ComparisonExpr)):
-                    dnt = xp.do_not_trade_when
-                    pcc = pc.condition
-                    if dnt.feature == pcc.feature:
-                        # do_not_trade_when: X > T and precondition: X < T (conflict)
-                        if (dnt.op == ">" and pcc.op == "<"
-                                and pcc.threshold <= dnt.threshold):
-                            issues.append(ReviewIssue(
-                                severity="warning",
-                                category="execution_risk_mismatch",
-                                description=(
-                                    f"do_not_trade_when ({dnt.feature} > {dnt.threshold}) "
-                                    f"conflicts with precondition[{i}] "
-                                    f"({pcc.feature} < {pcc.threshold})"
-                                ),
-                                suggestion="One of these conditions may be redundant",
-                            ))
-
     # ── 11. Latency/structure warning (Phase 2) ───────────────────
 
     def _check_latency_structure_warning(self, spec: StrategySpecV2,
                                           issues: list[ReviewIssue]) -> None:
-        """Warn about large rolling/persist windows that imply latency."""
         all_nodes = self._collect_all_nodes(spec)
 
         for node in all_nodes:
@@ -423,8 +416,215 @@ class StrategyReviewerV2:
                         suggestion="Steps > 200 may cause excessive memory usage",
                     ))
 
+    # ── 12. State reference integrity (Phase 3) ───────────────────
+
+    def _check_state_reference_integrity(
+        self,
+        spec: StrategySpecV2,
+        issues: list[ReviewIssue],
+    ) -> None:
+        state_vars = set(spec.state_policy.vars.keys()) if spec.state_policy else set()
+        for node in self._collect_all_nodes(spec):
+            if isinstance(node, StateVarExpr) and node.name not in state_vars:
+                issues.append(ReviewIssue(
+                    severity="error",
+                    category="state_reference_integrity",
+                    description=(
+                        f"state_var '{node.name}' is referenced but not defined "
+                        f"in state_policy.vars"
+                    ),
+                    suggestion=(
+                        "Declare the variable in state_policy.vars or "
+                        "replace the expression with a feature-based condition"
+                    ),
+                ))
+
+    # ── 13. State deadlock (Phase 3) ──────────────────────────────
+
+    def _check_state_deadlock(self, spec: StrategySpecV2,
+                               issues: list[ReviewIssue]) -> None:
+        sp = spec.state_policy
+        if sp is None:
+            return
+
+        for i, guard in enumerate(sp.guards):
+            if self._is_always_true(guard.condition):
+                issues.append(ReviewIssue(
+                    severity="error",
+                    category="state_deadlock",
+                    description=(
+                        f"state_policy.guards[{i}] '{guard.name}' appears always true "
+                        "and can permanently block entries"
+                    ),
+                    suggestion=(
+                        "Use a conditional guard (e.g., state_var threshold) "
+                        "or add a state event that can release the guard"
+                    ),
+                ))
+
+        if spec.execution_policy and spec.execution_policy.do_not_trade_when is not None:
+            if self._is_always_true(spec.execution_policy.do_not_trade_when):
+                issues.append(ReviewIssue(
+                    severity="error",
+                    category="state_deadlock",
+                    description="execution_policy.do_not_trade_when appears always true",
+                    suggestion="Relax the condition or make it state/feature dependent",
+                ))
+
+        has_loss_increment = False
+        has_loss_reset = False
+        for event in sp.events:
+            for upd in event.updates:
+                if upd.var == "loss_streak" and upd.op == "increment":
+                    has_loss_increment = True
+                if upd.var == "loss_streak" and upd.op == "reset":
+                    has_loss_reset = True
+        if has_loss_increment and not has_loss_reset:
+            issues.append(ReviewIssue(
+                severity="warning",
+                category="state_deadlock",
+                description=(
+                    "loss_streak is incremented but never reset — "
+                    "entry degradation/guards may become permanent"
+                ),
+                suggestion="Add an on_exit_profit or on_flatten reset for loss_streak",
+            ))
+
+    # ── 14. Guard conflict (Phase 3) ───────────────────────────────
+
+    def _check_guard_conflict(self, spec: StrategySpecV2,
+                               issues: list[ReviewIssue]) -> None:
+        sp = spec.state_policy
+        if sp is not None:
+            names: set[str] = set()
+            for i, guard in enumerate(sp.guards):
+                if guard.name in names:
+                    issues.append(ReviewIssue(
+                        severity="warning",
+                        category="guard_conflict",
+                        description=(
+                            f"state_policy.guards[{i}] has duplicate name '{guard.name}'"
+                        ),
+                        suggestion="Use unique guard names to avoid ambiguous diagnostics",
+                    ))
+                names.add(guard.name)
+
+
+    # ── 15. Degradation conflict (Phase 3) ─────────────────────────
+
+    def _check_degradation_conflict(self, spec: StrategySpecV2,
+                                     issues: list[ReviewIssue]) -> None:
+        def check_risk(path: str, risk_policy) -> None:
+            for i, rule in enumerate(risk_policy.degradation_rules):
+                if rule.action.type != "block_new_entries":
+                    continue
+                if self._is_always_true(rule.condition):
+                    issues.append(ReviewIssue(
+                        severity="error",
+                        category="degradation_conflict",
+                        description=(
+                            f"{path}.degradation_rules[{i}] always blocks new entries"
+                        ),
+                        suggestion=(
+                            "Use a conditional block rule or replace with scale_strength"
+                        ),
+                    ))
+
+        check_risk("risk_policy", spec.risk_policy)
+        for i, regime in enumerate(spec.regimes):
+            if regime.risk_override is not None:
+                check_risk(f"regimes[{i}].risk_override", regime.risk_override)
+
+    # ── 16. Exit semantics risk (Phase 3) ──────────────────────────
+
+    def _check_exit_semantics_risk(self, spec: StrategySpecV2,
+                                    issues: list[ReviewIssue]) -> None:
+        metadata_flag = bool(spec.metadata.get("entry_gates_apply_to_exit"))
+        has_entry_gates = bool(spec.preconditions) or bool(spec.regimes)
+        has_dnt = bool(spec.execution_policy and spec.execution_policy.do_not_trade_when is not None)
+        has_unconditional_close = self._has_unconditional_close_all(spec)
+
+        if metadata_flag:
+            issues.append(ReviewIssue(
+                severity="error",
+                category="exit_semantics_risk",
+                description=(
+                    "metadata indicates entry gates may be applied to exits "
+                    "(entry_gates_apply_to_exit=true)"
+                ),
+                suggestion=(
+                    "Use exit-first runtime semantics so do_not_trade/preconditions/regime "
+                    "cannot block in-position exits"
+                ),
+            ))
+
+        if (has_entry_gates or has_dnt) and not has_unconditional_close:
+            issues.append(ReviewIssue(
+                severity="warning",
+                category="exit_semantics_risk",
+                description=(
+                    "Entry gating conditions are present (preconditions/regimes/do_not_trade_when) "
+                    "and no unconditional close_all exit exists"
+                ),
+                suggestion=(
+                    "Ensure runtime enforces exit-first semantics and add a robust close_all fail-safe"
+                ),
+            ))
+
+    # ── Helpers ─────────────────────────────────────────────────────
+
+    def _iter_execution_policies(self, spec: StrategySpecV2):
+        if spec.execution_policy is not None:
+            yield "execution_policy", spec.execution_policy
+        for i, regime in enumerate(spec.regimes):
+            if regime.execution_override is not None:
+                yield f"regimes[{i}].execution_override", regime.execution_override
+
+    def _has_unconditional_close_all(self, spec: StrategySpecV2) -> bool:
+        for xp in spec.exit_policies:
+            for rule in xp.rules:
+                if rule.action.type == "close_all" and self._is_always_true(rule.condition):
+                    return True
+        return False
+
+    def _is_always_true(self, node: ExprNode) -> bool:
+        if isinstance(node, ConstExpr):
+            return node.value != 0.0
+        if isinstance(node, AllExpr):
+            return bool(node.children) and all(self._is_always_true(c) for c in node.children)
+        if isinstance(node, AnyExpr):
+            return any(self._is_always_true(c) for c in node.children)
+        if isinstance(node, NotExpr):
+            return self._is_always_false(node.child)
+        if isinstance(node, ComparisonExpr) and node.left is not None and isinstance(node.left, ConstExpr):
+            v = node.left.value
+            t = node.threshold
+            if node.op == ">":
+                return v > t
+            if node.op == "<":
+                return v < t
+            if node.op == ">=":
+                return v >= t
+            if node.op == "<=":
+                return v <= t
+            if node.op == "==":
+                return abs(v - t) < 1e-9
+        return False
+
+    def _is_always_false(self, node: ExprNode) -> bool:
+        if isinstance(node, ConstExpr):
+            return node.value == 0.0
+        if isinstance(node, AllExpr):
+            return any(self._is_always_false(c) for c in node.children)
+        if isinstance(node, AnyExpr):
+            return bool(node.children) and all(self._is_always_false(c) for c in node.children)
+        if isinstance(node, NotExpr):
+            return self._is_always_true(node.child)
+        if isinstance(node, ComparisonExpr) and node.left is not None and isinstance(node.left, ConstExpr):
+            return not self._is_always_true(node)
+        return False
+
     def _collect_all_nodes(self, spec: StrategySpecV2) -> list[ExprNode]:
-        """Collect all AST nodes in the spec for analysis."""
         nodes: list[ExprNode] = []
         for pc in spec.preconditions:
             self._walk_tree(pc.condition, nodes)
@@ -436,12 +636,27 @@ class StrategyReviewerV2:
                 self._walk_tree(rule.condition, nodes)
         for regime in spec.regimes:
             self._walk_tree(regime.when, nodes)
+            if regime.risk_override is not None:
+                for rr in regime.risk_override.degradation_rules:
+                    self._walk_tree(rr.condition, nodes)
+            if regime.execution_override is not None:
+                if regime.execution_override.do_not_trade_when is not None:
+                    self._walk_tree(regime.execution_override.do_not_trade_when, nodes)
+                for ar in regime.execution_override.adaptation_rules:
+                    self._walk_tree(ar.condition, nodes)
         if spec.execution_policy and spec.execution_policy.do_not_trade_when:
             self._walk_tree(spec.execution_policy.do_not_trade_when, nodes)
+        if spec.execution_policy:
+            for ar in spec.execution_policy.adaptation_rules:
+                self._walk_tree(ar.condition, nodes)
+        for rr in spec.risk_policy.degradation_rules:
+            self._walk_tree(rr.condition, nodes)
+        if spec.state_policy is not None:
+            for guard in spec.state_policy.guards:
+                self._walk_tree(guard.condition, nodes)
         return nodes
 
     def _walk_tree(self, node: ExprNode, acc: list[ExprNode]) -> None:
-        """Recursively collect all nodes in an expression tree."""
         acc.append(node)
         if hasattr(node, "children"):
             for child in node.children:
@@ -450,3 +665,238 @@ class StrategyReviewerV2:
             self._walk_tree(node.child, acc)
         if isinstance(node, PersistExpr):
             self._walk_tree(node.expr, acc)
+        if isinstance(node, ComparisonExpr) and node.left is not None:
+            self._walk_tree(node.left, acc)
+
+    def _check_position_attr_sanity(
+        self,
+        spec: StrategySpecV2,
+        issues: list[ReviewIssue],
+    ) -> None:
+        entry_nodes: list[ExprNode] = []
+
+        for pc in spec.preconditions:
+            self._walk_tree(pc.condition, entry_nodes)
+        for ep in spec.entry_policies:
+            self._walk_tree(ep.trigger, entry_nodes)
+            self._walk_tree(ep.strength, entry_nodes)
+        if spec.state_policy is not None:
+            for guard in spec.state_policy.guards:
+                self._walk_tree(guard.condition, entry_nodes)
+        for rr in spec.risk_policy.degradation_rules:
+            self._walk_tree(rr.condition, entry_nodes)
+        if spec.execution_policy and spec.execution_policy.do_not_trade_when is not None:
+            self._walk_tree(spec.execution_policy.do_not_trade_when, entry_nodes)
+        if spec.execution_policy is not None:
+            for ar in spec.execution_policy.adaptation_rules:
+                self._walk_tree(ar.condition, entry_nodes)
+        for regime in spec.regimes:
+            self._walk_tree(regime.when, entry_nodes)
+            if regime.risk_override is not None:
+                for rr in regime.risk_override.degradation_rules:
+                    self._walk_tree(rr.condition, entry_nodes)
+            if regime.execution_override is not None:
+                if regime.execution_override.do_not_trade_when is not None:
+                    self._walk_tree(regime.execution_override.do_not_trade_when, entry_nodes)
+                for ar in regime.execution_override.adaptation_rules:
+                    self._walk_tree(ar.condition, entry_nodes)
+
+        warned_attrs: set[str] = set()
+        for node in entry_nodes:
+            if not isinstance(node, PositionAttrExpr):
+                continue
+            if node.name in warned_attrs:
+                continue
+            warned_attrs.add(node.name)
+            issues.append(ReviewIssue(
+                severity="warning",
+                category="position_attr_sanity",
+                description=(
+                    f"position_attr {node.name} appears in entry path logic and may evaluate as flat-state constant"
+                ),
+                suggestion=(
+                    "Prefer position_attr in exit rules, or gate usage with explicit in-position state"
+                ),
+            ))
+
+        for node in self._collect_all_nodes(spec):
+            if not isinstance(node, ComparisonExpr):
+                continue
+            if not isinstance(node.left, PositionAttrExpr):
+                continue
+            if node.left.name != "unrealized_pnl_bps":
+                continue
+            if abs(node.threshold) > 1000.0:
+                issues.append(ReviewIssue(
+                    severity="warning",
+                    category="position_attr_sanity",
+                    description=(
+                        f"unrealized_pnl_bps threshold {node.threshold} looks unrealistically large"
+                    ),
+                    suggestion="Use tighter stop/take-profit thresholds for tick-level strategies",
+                ))
+
+    def _check_state_event_order_risk(
+        self,
+        spec: StrategySpecV2,
+        issues: list[ReviewIssue],
+    ) -> None:
+        sp = spec.state_policy
+        if sp is None:
+            return
+
+        incremented: set[str] = set()
+        reset: set[str] = set()
+        updated_on_exit: set[str] = set()
+        reset_on_flatten: set[str] = set()
+
+        for event in sp.events:
+            for upd in event.updates:
+                if upd.op == "increment":
+                    incremented.add(upd.var)
+                if upd.op == "reset":
+                    reset.add(upd.var)
+                if event.on in {"on_exit_loss", "on_exit_profit"}:
+                    updated_on_exit.add(upd.var)
+                if event.on == "on_flatten" and upd.op == "reset":
+                    reset_on_flatten.add(upd.var)
+
+        for var in sorted(incremented - reset):
+            issues.append(ReviewIssue(
+                severity="warning",
+                category="state_event_order_risk",
+                description=f"state var {var} is incremented but never reset",
+                suggestion="Add reset coverage on on_exit_profit or on_flatten",
+            ))
+
+        for var in sorted(updated_on_exit & reset_on_flatten):
+            issues.append(ReviewIssue(
+                severity="warning",
+                category="state_event_order_risk",
+                description=(
+                    f"state var {var} is updated on exit and reset on flatten; same-tick updates may be cleared"
+                ),
+                suggestion="Confirm event ordering intent or split variables for post-exit vs flat memory",
+            ))
+
+    def _check_execution_override_conflict(
+        self,
+        spec: StrategySpecV2,
+        issues: list[ReviewIssue],
+    ) -> None:
+        for path, xp in self._iter_execution_policies(spec):
+            rules = xp.adaptation_rules
+            for i in range(len(rules)):
+                for j in range(i + 1, len(rules)):
+                    a = rules[i]
+                    b = rules[j]
+                    if not self._is_always_true(a.condition):
+                        continue
+                    if not self._is_always_true(b.condition):
+                        continue
+
+                    conflict_fields: list[str] = []
+                    if (a.override.placement_mode is not None
+                            and b.override.placement_mode is not None
+                            and a.override.placement_mode != b.override.placement_mode):
+                        conflict_fields.append("placement_mode")
+                    if (a.override.cancel_after_ticks is not None
+                            and b.override.cancel_after_ticks is not None
+                            and a.override.cancel_after_ticks != b.override.cancel_after_ticks):
+                        conflict_fields.append("cancel_after_ticks")
+                    if (a.override.max_reprices is not None
+                            and b.override.max_reprices is not None
+                            and a.override.max_reprices != b.override.max_reprices):
+                        conflict_fields.append("max_reprices")
+
+                    if conflict_fields:
+                        issues.append(ReviewIssue(
+                            severity="error",
+                            category="execution_override_conflict",
+                            description=(
+                                f"{path}.adaptation_rules[{i}] and [{j}] are always true and conflict on {', '.join(conflict_fields)}"
+                            ),
+                            suggestion="Make rule conditions mutually exclusive or merge overrides",
+                        ))
+
+    def _check_regime_exit_coverage(
+        self,
+        spec: StrategySpecV2,
+        issues: list[ReviewIssue],
+    ) -> None:
+        if not spec.regimes:
+            return
+
+        exit_by_name = {xp.name: xp for xp in spec.exit_policies}
+
+        def has_close_all(policies: list) -> bool:
+            for policy in policies:
+                for rule in policy.rules:
+                    if rule.action.type == "close_all":
+                        return True
+            return False
+
+        global_has_close = has_close_all(spec.exit_policies)
+        has_regime_entry = False
+        for i, regime in enumerate(spec.regimes):
+            if not regime.entry_policy_refs:
+                continue
+            has_regime_entry = True
+
+            if not regime.exit_policy_ref:
+                issues.append(ReviewIssue(
+                    severity="warning",
+                    category="regime_exit_coverage",
+                    description=(
+                        f"regimes[{i}] {regime.name} has entry refs but no explicit exit policy ref"
+                    ),
+                    suggestion="Set exit_policy_ref explicitly or ensure global exits are robust",
+                ))
+                continue
+
+            xp = exit_by_name.get(regime.exit_policy_ref)
+            if xp is not None and not has_close_all([xp]):
+                issues.append(ReviewIssue(
+                    severity="warning",
+                    category="regime_exit_coverage",
+                    description=(
+                        f"regimes[{i}] {regime.name} exit policy {regime.exit_policy_ref} has no close_all"
+                    ),
+                    suggestion="Add a close_all fail-safe in regime exit policy",
+                ))
+
+        if has_regime_entry and not global_has_close:
+            issues.append(ReviewIssue(
+                severity="warning",
+                category="regime_exit_coverage",
+                description="Regime entries exist but global exit policies have no close_all",
+                suggestion="Add at least one global close_all fallback",
+            ))
+
+        strong_entry_throttles = (
+            any(ep.constraints.cooldown_ticks > 0 for ep in spec.entry_policies)
+            or bool(spec.state_policy and spec.state_policy.guards)
+            or any(rr.action.type == "block_new_entries" for rr in spec.risk_policy.degradation_rules)
+        )
+        for regime in spec.regimes:
+            if regime.risk_override is not None and any(
+                rr.action.type == "block_new_entries"
+                for rr in regime.risk_override.degradation_rules
+            ):
+                strong_entry_throttles = True
+                break
+
+        has_holding_ticks_exit = False
+        for node in self._collect_all_nodes(spec):
+            if isinstance(node, ComparisonExpr) and isinstance(node.left, PositionAttrExpr):
+                if node.left.name == "holding_ticks":
+                    has_holding_ticks_exit = True
+                    break
+
+        if strong_entry_throttles and not has_holding_ticks_exit:
+            issues.append(ReviewIssue(
+                severity="warning",
+                category="regime_exit_coverage",
+                description="Strong entry throttles are present but no holding_ticks-based time exit was found",
+                suggestion="Consider adding position_attr holding_ticks time exit",
+            ))

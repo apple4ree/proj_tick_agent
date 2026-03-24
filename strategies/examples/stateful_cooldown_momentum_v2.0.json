@@ -1,0 +1,124 @@
+{
+  "spec_format": "v2",
+  "name": "stateful_cooldown_momentum",
+  "version": "2.0",
+  "description": "Example v2 Phase3+ strategy using state_policy and degradation rules.",
+  "preconditions": [
+    {
+      "name": "spread_ok",
+      "condition": {"type": "comparison", "feature": "spread_bps", "op": "<", "threshold": 25.0}
+    }
+  ],
+  "entry_policies": [
+    {
+      "name": "long_entry",
+      "side": "long",
+      "trigger": {
+        "type": "all",
+        "children": [
+          {"type": "comparison", "feature": "order_imbalance", "op": ">", "threshold": 0.3},
+          {"type": "comparison", "feature": "depth_imbalance", "op": ">", "threshold": 0.1}
+        ]
+      },
+      "strength": {"type": "const", "value": 0.55},
+      "constraints": {"cooldown_ticks": 30, "no_reentry_until_flat": false}
+    }
+  ],
+  "exit_policies": [
+    {
+      "name": "state_exits",
+      "rules": [
+        {
+          "name": "pnl_stop",
+          "priority": 1,
+          "condition": {
+            "type": "comparison",
+            "left": {"type": "position_attr", "name": "unrealized_pnl_bps"},
+            "op": "<=",
+            "threshold": -30.0
+          },
+          "action": {"type": "close_all"}
+        },
+        {
+          "name": "time_exit",
+          "priority": 2,
+          "condition": {
+            "type": "comparison",
+            "left": {"type": "position_attr", "name": "holding_ticks"},
+            "op": ">=",
+            "threshold": 25.0
+          },
+          "action": {"type": "close_all"}
+        }
+      ]
+    }
+  ],
+  "risk_policy": {
+    "max_position": 350,
+    "inventory_cap": 700,
+    "position_sizing": {"mode": "fixed", "base_size": 100, "max_size": 350},
+    "degradation_rules": [
+      {
+        "condition": {
+          "type": "comparison",
+          "left": {"type": "state_var", "name": "loss_streak"},
+          "op": ">=",
+          "threshold": 2.0
+        },
+        "action": {"type": "scale_strength", "factor": 0.7}
+      },
+      {
+        "condition": {
+          "type": "comparison",
+          "left": {"type": "state_var", "name": "loss_streak"},
+          "op": ">=",
+          "threshold": 4.0
+        },
+        "action": {"type": "block_new_entries"}
+      }
+    ]
+  },
+  "execution_policy": {
+    "placement_mode": "adaptive",
+    "cancel_after_ticks": 10,
+    "max_reprices": 2,
+    "adaptation_rules": [
+      {
+        "condition": {"type": "comparison", "feature": "spread_bps", "op": ">", "threshold": 18.0},
+        "override": {"placement_mode": "passive_only", "cancel_after_ticks": 4, "max_reprices": 1}
+      }
+    ]
+  },
+  "state_policy": {
+    "vars": {"loss_streak": 0.0, "reentry_block": 0.0},
+    "guards": [
+      {
+        "name": "loss_guard",
+        "condition": {
+          "type": "comparison",
+          "left": {"type": "state_var", "name": "loss_streak"},
+          "op": ">=",
+          "threshold": 5.0
+        },
+        "effect": "block_entry"
+      }
+    ],
+    "events": [
+      {
+        "name": "track_loss",
+        "on": "on_exit_loss",
+        "updates": [{"var": "loss_streak", "op": "increment", "value": 1.0}]
+      },
+      {
+        "name": "reset_win",
+        "on": "on_exit_profit",
+        "updates": [{"var": "loss_streak", "op": "reset"}]
+      }
+    ]
+  },
+  "regimes": [],
+  "metadata": {
+    "kind": "example",
+    "phase": "3_stabilization"
+  }
+}

@@ -177,6 +177,7 @@ def get_paths(cfg: dict) -> dict[str, str]:
 def get_generation(cfg: dict) -> dict[str, Any]:
     """Extract the ``generation`` section with sensible defaults."""
     defaults = {
+        "spec_format": "v2",
         "backend": "template",
         "mode": "live",
         "latency_ms": 1.0,
@@ -185,6 +186,9 @@ def get_generation(cfg: dict) -> dict[str, Any]:
         "idea_index": 0,
         "openai_model": "gpt-4o",
         "static_review_required": True,
+        "allow_template_fallback": True,
+        "allow_heuristic_fallback": True,
+        "fail_on_fallback": False,
     }
     gen = cfg.get("generation", {})
     for k, v in defaults.items():

@@ -279,22 +279,6 @@ class TestCompilerV2:
 
 class TestCompileDispatch:
 
-    def test_dispatch_v1(self):
-        from strategy_block.strategy_specs.schema import StrategySpec, SignalRule, ExitRule
-        spec = StrategySpec(
-            name="test_v1",
-            signal_rules=[
-                SignalRule(feature="order_imbalance", operator=">",
-                           threshold=0.3, score_contribution=0.5),
-            ],
-            exit_rules=[
-                ExitRule(exit_type="stop_loss", threshold_bps=15.0),
-            ],
-        )
-        strategy = compile_strategy(spec)
-        from strategy_block.strategy_compiler.compiler import CompiledStrategy
-        assert isinstance(strategy, CompiledStrategy)
-
     def test_dispatch_v2(self):
         spec = _make_spec()
         strategy = compile_strategy(spec)

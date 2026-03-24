@@ -479,6 +479,113 @@ def plot_summary_dashboard(data: dict, run_dir: Path, show: bool = True) -> Path
     return out_path
 
 
+
+# ──────────────────────────────────────────────────────────────────────
+# Figure 5: Intraday Cumulative Profit
+# ──────────────────────────────────────────────────────────────────────
+
+def _build_intraday_cumulative_profit_series(data: dict) -> pd.Series:
+    """Build timestamp-indexed cumulative PnL series from run artifacts."""
+    pnl_entries: pd.DataFrame = data.get("pnl_entries", pd.DataFrame())
+    pnl_series_df: pd.DataFrame = data.get("pnl_series", pd.DataFrame())
+
+    if not pnl_entries.empty and "timestamp" in pnl_entries.columns:
+        entries = pnl_entries.copy().sort_values("timestamp")
+        ts = pd.to_datetime(entries["timestamp"], errors="coerce")
+        entries = entries.loc[ts.notna()].copy()
+        entries["timestamp"] = ts.loc[ts.notna()]
+        if entries.empty:
+            return pd.Series(dtype=float, name="cumulative_net_pnl")
+
+        if "cumulative_net_pnl" in entries.columns:
+            return pd.Series(
+                entries["cumulative_net_pnl"].astype(float).values,
+                index=pd.DatetimeIndex(entries["timestamp"]),
+                name="cumulative_net_pnl",
+            )
+
+        if {"realized_pnl", "unrealized_pnl"}.issubset(entries.columns):
+            realized = entries["realized_pnl"].fillna(0.0).astype(float).cumsum()
+            commission = entries.get("commission_cost", 0.0)
+            tax = entries.get("tax_cost", 0.0)
+            commission_s = pd.Series(commission, index=entries.index).fillna(0.0).astype(float)
+            tax_s = pd.Series(tax, index=entries.index).fillna(0.0).astype(float)
+            cum_cost = (commission_s + tax_s).cumsum()
+            unrealized = entries["unrealized_pnl"].fillna(0.0).astype(float)
+            values = realized - cum_cost + unrealized
+            return pd.Series(
+                values.values,
+                index=pd.DatetimeIndex(entries["timestamp"]),
+                name="cumulative_net_pnl",
+            )
+
+        if "net_pnl" in entries.columns:
+            values = entries["net_pnl"].fillna(0.0).astype(float).cumsum()
+            return pd.Series(
+                values.values,
+                index=pd.DatetimeIndex(entries["timestamp"]),
+                name="cumulative_net_pnl",
+            )
+
+    if not pnl_series_df.empty:
+        if "cumulative_net_pnl" in pnl_series_df.columns:
+            series = pnl_series_df["cumulative_net_pnl"]
+        else:
+            series = pnl_series_df.iloc[:, 0]
+        series = series.astype(float)
+        series.index = pd.DatetimeIndex(series.index)
+        return series.rename("cumulative_net_pnl")
+
+    return pd.Series(dtype=float, name="cumulative_net_pnl")
+
+
+def plot_intraday_cumulative_profit(data: dict, run_dir: Path, show: bool = True) -> Path:
+    """Line chart of intraday cumulative profit over 09:00–16:00."""
+    series = _build_intraday_cumulative_profit_series(data).sort_index()
+
+    fig, ax = plt.subplots(figsize=(14, 5))
+    ax.set_title("Intraday Cumulative Profit", fontsize=12, fontweight="bold")
+    ax.set_xlabel("Time")
+    ax.set_ylabel("Cumulative Profit (KRW)")
+    ax.grid(True, alpha=0.25, linestyle="--")
+    ax.axhline(0, color="gray", linewidth=0.8, linestyle="--")
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:,.0f}"))
+
+    if not series.empty:
+        ax.plot(series.index, series.values, color="#1f77b4", linewidth=1.8)
+        session_day = series.index.min().normalize()
+    else:
+        ax.text(
+            0.5,
+            0.5,
+            "No PnL time series available",
+            transform=ax.transAxes,
+            ha="center",
+            va="center",
+            fontsize=11,
+            color="dimgray",
+        )
+        session_day = pd.Timestamp.today().normalize()
+
+    session_start = session_day + pd.Timedelta(hours=9)
+    session_end = session_day + pd.Timedelta(hours=16)
+    ax.set_xlim(session_start, session_end)
+    ax.xaxis.set_major_locator(mdates.HourLocator(byhour=range(9, 17), interval=1))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+
+    plt.tight_layout()
+
+    out_path = run_dir / "plots" / "intraday_cumulative_profit.png"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    print(f"Saved: {out_path}")
+
+    if show:
+        plt.show()
+    plt.close(fig)
+    return out_path
+
+
 # ──────────────────────────────────────────────────────────────────────
 # 공개 API (for report_builder integration)
 # ──────────────────────────────────────────────────────────────────────
@@ -499,6 +606,7 @@ def generate_all_plots(run_dir: str | Path, show: bool = False) -> list[Path]:
     paths.append(plot_signal_analysis(data, run_dir, show=show))
     paths.append(plot_execution_quality(data, run_dir, show=show))
     paths.append(plot_summary_dashboard(data, run_dir, show=show))
+    paths.append(plot_intraday_cumulative_profit(data, run_dir, show=show))
 
     return paths
 

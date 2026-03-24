@@ -277,3 +277,48 @@ class SpreadAdaptivePlacement(PlacementPolicy):
             return self._aggressive.place(parent, qty, state)
         else:
             return self._passive.place(parent, qty, state)
+
+VALID_PLACEMENT_MODE_OVERRIDES: frozenset[str] = frozenset({
+    "passive_join",
+    "passive_only",
+    "aggressive_cross",
+    "adaptive",
+})
+
+
+def resolve_placement_policy(
+    fallback: PlacementPolicy,
+    signal_tags: dict[str, object] | None,
+) -> PlacementPolicy:
+    """Resolve effective placement policy from optional signal tags.
+
+    Backward compatibility:
+    - when tags are absent or unsupported, returns ``fallback`` unchanged.
+    """
+    if not signal_tags:
+        return fallback
+
+    mode_raw = signal_tags.get("placement_mode")
+    if not isinstance(mode_raw, str):
+        return fallback
+
+    mode = mode_raw.strip().lower()
+    if mode not in VALID_PLACEMENT_MODE_OVERRIDES:
+        return fallback
+
+    if mode in {"passive_join", "passive_only"}:
+        if isinstance(fallback, PassivePlacement):
+            return fallback
+        return PassivePlacement()
+
+    if mode == "aggressive_cross":
+        if isinstance(fallback, AggressivePlacement):
+            return fallback
+        return AggressivePlacement(use_market_orders=False)
+
+    if mode == "adaptive":
+        if isinstance(fallback, SpreadAdaptivePlacement):
+            return fallback
+        return SpreadAdaptivePlacement()
+
+    return fallback

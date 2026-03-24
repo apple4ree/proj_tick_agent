@@ -9,17 +9,17 @@
 
     # 기본 실행 (config stack에서 data_dir, fee, latency 등 자동 로드)
     PYTHONPATH=src python scripts/backtest.py \
-        --spec strategies/imbalance_momentum_v1.0.json \
+        --spec strategies/examples/stateful_cooldown_momentum_v2.0.json \
         --symbol 005930 --start-date 20260313
 
     # Profile override (config stack 위에 profile YAML을 merge)
     PYTHONPATH=src python scripts/backtest.py \
-        --spec strategies/imbalance_momentum_v1.0.json \
+        --spec strategies/examples/stateful_cooldown_momentum_v2.0.json \
         --symbol 005930 --start-date 20260313 --profile smoke
 
     # Explicit override (profile 위에 추가 YAML을 merge)
     PYTHONPATH=src python scripts/backtest.py \
-        --spec strategies/imbalance_momentum_v1.0.json \
+        --spec strategies/examples/stateful_cooldown_momentum_v2.0.json \
         --symbol 005930 --start-date 20260313 --config custom_override.yaml
 """
 
@@ -48,7 +48,7 @@ from evaluation_orchestration.layer7_validation import (
 )
 from strategy_block.strategy.base import Strategy
 from strategy_block.strategy_compiler import compile_strategy
-from strategy_block.strategy_registry.registry import _detect_spec_format, _load_spec_by_format
+from strategy_block.strategy_specs.v2.schema_v2 import StrategySpecV2
 from utils.config import load_config, get_paths, get_backtest, get_backtest_worker
 
 logger = logging.getLogger(__name__)
@@ -141,16 +141,13 @@ def build_config(args: argparse.Namespace, bt_cfg: dict | None = None) -> Backte
     )
 
 
-def _load_spec(path: str):
-    """Load a strategy spec (v1 or v2) from a JSON file."""
-    from pathlib import Path as P
-    p = P(path)
-    fmt = _detect_spec_format(p)
-    return _load_spec_by_format(p, fmt)
+def _load_spec(path: str) -> StrategySpecV2:
+    """Load a StrategySpecV2 from a JSON file."""
+    return StrategySpecV2.load(path)
 
 
 def _build_strategy(args: argparse.Namespace) -> Strategy:
-    """Compile a strategy from the spec JSON (v1 or v2)."""
+    """Compile a strategy from a v2 strategy spec JSON."""
     spec = _load_spec(args.spec)
     return compile_strategy(spec)
 

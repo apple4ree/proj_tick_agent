@@ -1,0 +1,83 @@
+{
+  "spec_format": "v2",
+  "name": "position_aware_time_exit_momentum",
+  "version": "2.0",
+  "description": "Example v2 strategy that demonstrates position_attr driven exits.",
+  "preconditions": [
+    {
+      "name": "spread_ok",
+      "condition": {"type": "comparison", "feature": "spread_bps", "op": "<", "threshold": 20.0}
+    }
+  ],
+  "entry_policies": [
+    {
+      "name": "momentum_long",
+      "side": "long",
+      "trigger": {
+        "type": "all",
+        "children": [
+          {"type": "comparison", "feature": "order_imbalance", "op": ">", "threshold": 0.3},
+          {"type": "comparison", "feature": "depth_imbalance", "op": ">", "threshold": 0.1}
+        ]
+      },
+      "strength": {"type": "const", "value": 0.6},
+      "constraints": {"cooldown_ticks": 20, "no_reentry_until_flat": false}
+    }
+  ],
+  "exit_policies": [
+    {
+      "name": "position_exits",
+      "rules": [
+        {
+          "name": "max_hold",
+          "priority": 1,
+          "condition": {
+            "type": "comparison",
+            "left": {"type": "position_attr", "name": "holding_ticks"},
+            "op": ">=",
+            "threshold": 18.0
+          },
+          "action": {"type": "close_all"}
+        },
+        {
+          "name": "stop_loss",
+          "priority": 2,
+          "condition": {
+            "type": "comparison",
+            "left": {"type": "position_attr", "name": "unrealized_pnl_bps"},
+            "op": "<=",
+            "threshold": -25.0
+          },
+          "action": {"type": "close_all"}
+        }
+      ]
+    }
+  ],
+  "risk_policy": {
+    "max_position": 300,
+    "inventory_cap": 600,
+    "position_sizing": {"mode": "fixed", "base_size": 100, "max_size": 300}
+  },
+  "execution_policy": {
+    "placement_mode": "adaptive",
+    "cancel_after_ticks": 8,
+    "max_reprices": 2,
+    "adaptation_rules": [
+      {
+        "condition": {"type": "comparison", "feature": "spread_bps", "op": ">", "threshold": 15.0},
+        "override": {"placement_mode": "passive_only", "cancel_after_ticks": 3, "max_reprices": 1}
+      }
+    ]
+  },
+  "state_policy": {
+    "vars": {"cooldown_state": 0.0},
+    "guards": [],
+    "events": []
+  },
+  "regimes": [],
+  "metadata": {
+    "kind": "example",
+    "phase": "3_stabilization",
+    "uses": ["position_attr", "execution_adaptation"]
+  }
+}

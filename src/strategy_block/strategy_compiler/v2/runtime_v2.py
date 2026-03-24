@@ -6,17 +6,24 @@ to evaluate expression trees against live market state features.
 Phase 2 adds:
 - Feature history buffer for lag / rolling evaluation
 - Boolean condition history for persist evaluation
+
+Phase 3 adds:
+- Runtime state variables (`state_vars`)
+- `state_var` expression evaluation
+- `position_attr` expression evaluation
+- `comparison.left` expression support
 """
 from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any
 
 from strategy_block.strategy_specs.v2.ast_nodes import (
     ExprNode,
     ConstExpr,
     FeatureExpr,
+    StateVarExpr,
+    PositionAttrExpr,
     ComparisonExpr,
     AllExpr,
     AnyExpr,
@@ -43,6 +50,9 @@ class RuntimeStateV2:
     prev_features: dict[str, float] = field(default_factory=dict)
     trailing_high: float = 0.0
     trailing_low: float = float("inf")
+
+    # Phase 3: explicit strategy runtime state vars
+    state_vars: dict[str, float] = field(default_factory=dict)
 
     # Phase 2: feature history for lag/rolling
     feature_history: deque[dict[str, float]] = field(
@@ -77,9 +87,9 @@ class RuntimeStateV2:
             return 0.0
         if method == "mean":
             return sum(values) / len(values)
-        elif method == "min":
+        if method == "min":
             return min(values)
-        elif method == "max":
+        if method == "max":
             return max(values)
         return 0.0
 
@@ -99,8 +109,60 @@ class RuntimeStateV2:
 
 def _persist_node_id(node: PersistExpr) -> str:
     """Generate a stable identifier for a PersistExpr node."""
-    # Use the serialized form as a stable key
     return f"persist_{id(node)}"
+
+
+def _compare(val: float, op: str, thr: float) -> bool:
+    if op == ">":
+        return val > thr
+    if op == "<":
+        return val < thr
+    if op == ">=":
+        return val >= thr
+    if op == "<=":
+        return val <= thr
+    if op == "==":
+        return abs(val - thr) < 1e-9
+    return False
+
+
+def _position_attr_value(name: str, features: dict[str, float],
+                         runtime: RuntimeStateV2 | None) -> float:
+    if runtime is None:
+        return 0.0
+
+    if name == "holding_ticks":
+        if not runtime.position_side or runtime.entry_tick < 0:
+            return 0.0
+        return float(max(0, runtime.tick_count - runtime.entry_tick))
+
+    if name == "entry_price":
+        return float(runtime.entry_price)
+
+    if name == "position_size":
+        return float(runtime.position_size)
+
+    if name == "position_side":
+        if runtime.position_side == "long":
+            return 1.0
+        if runtime.position_side == "short":
+            return -1.0
+        return 0.0
+
+    if name == "unrealized_pnl_bps":
+        if not runtime.position_side or runtime.entry_price <= 0.0:
+            return 0.0
+        mid = float(features.get("mid_price", 0.0))
+        if mid <= 0.0:
+            return 0.0
+        move_bps = ((mid - runtime.entry_price) / runtime.entry_price) * 10_000.0
+        if runtime.position_side == "long":
+            return move_bps
+        if runtime.position_side == "short":
+            return -move_bps
+        return 0.0
+
+    return 0.0
 
 
 def evaluate_bool(node: ExprNode, features: dict[str, float],
@@ -110,59 +172,58 @@ def evaluate_bool(node: ExprNode, features: dict[str, float],
     if isinstance(node, ConstExpr):
         return node.value != 0.0
 
-    elif isinstance(node, FeatureExpr):
+    if isinstance(node, FeatureExpr):
         val = features.get(node.name, 0.0)
         return val != 0.0
 
-    elif isinstance(node, ComparisonExpr):
-        val = features.get(node.feature, 0.0)
-        thr = node.threshold
-        if node.op == ">":
-            return val > thr
-        elif node.op == "<":
-            return val < thr
-        elif node.op == ">=":
-            return val >= thr
-        elif node.op == "<=":
-            return val <= thr
-        elif node.op == "==":
-            return abs(val - thr) < 1e-9
-        return False
+    if isinstance(node, StateVarExpr):
+        if runtime is None:
+            return False
+        return runtime.state_vars.get(node.name, 0.0) != 0.0
 
-    elif isinstance(node, AllExpr):
+    if isinstance(node, PositionAttrExpr):
+        return _position_attr_value(node.name, features, runtime) != 0.0
+
+    if isinstance(node, ComparisonExpr):
+        if node.left is not None:
+            val = evaluate_float(node.left, features, runtime)
+        else:
+            val = features.get(node.feature, 0.0)
+        return _compare(val, node.op, node.threshold)
+
+    if isinstance(node, AllExpr):
         return all(evaluate_bool(c, features, prev_features, runtime) for c in node.children)
 
-    elif isinstance(node, AnyExpr):
+    if isinstance(node, AnyExpr):
         return any(evaluate_bool(c, features, prev_features, runtime) for c in node.children)
 
-    elif isinstance(node, NotExpr):
+    if isinstance(node, NotExpr):
         return not evaluate_bool(node.child, features, prev_features, runtime)
 
-    elif isinstance(node, CrossExpr):
+    if isinstance(node, CrossExpr):
         cur = features.get(node.feature, 0.0)
         prev = prev_features.get(node.feature, cur)
         if node.direction == "above":
             return prev <= node.threshold < cur
-        elif node.direction == "below":
+        if node.direction == "below":
             return prev >= node.threshold > cur
         return False
 
-    elif isinstance(node, LagExpr):
+    if isinstance(node, LagExpr):
         if runtime is None:
             return False
         val = runtime.get_lag_value(node.feature, node.steps)
         return val != 0.0
 
-    elif isinstance(node, RollingExpr):
+    if isinstance(node, RollingExpr):
         if runtime is None:
             return False
         val = runtime.get_rolling(node.feature, node.window, node.method)
         return val != 0.0
 
-    elif isinstance(node, PersistExpr):
+    if isinstance(node, PersistExpr):
         if runtime is None:
             return False
-        # Evaluate the inner expression and record it
         inner_result = evaluate_bool(node.expr, features, prev_features, runtime)
         node_id = _persist_node_id(node)
         runtime.record_persist(node_id, inner_result, node.window)
@@ -174,16 +235,22 @@ def evaluate_bool(node: ExprNode, features: dict[str, float],
 
 def evaluate_float(node: ExprNode, features: dict[str, float],
                    runtime: RuntimeStateV2 | None = None) -> float:
-    """Evaluate an expression node as a float value (for strength)."""
+    """Evaluate an expression node as a float value."""
     if isinstance(node, ConstExpr):
         return node.value
-    elif isinstance(node, FeatureExpr):
+    if isinstance(node, FeatureExpr):
         return features.get(node.name, 0.0)
-    elif isinstance(node, LagExpr):
+    if isinstance(node, StateVarExpr):
+        if runtime is None:
+            return 0.0
+        return runtime.state_vars.get(node.name, 0.0)
+    if isinstance(node, PositionAttrExpr):
+        return _position_attr_value(node.name, features, runtime)
+    if isinstance(node, LagExpr):
         if runtime is None:
             return 0.0
         return runtime.get_lag_value(node.feature, node.steps)
-    elif isinstance(node, RollingExpr):
+    if isinstance(node, RollingExpr):
         if runtime is None:
             return 0.0
         return runtime.get_rolling(node.feature, node.window, node.method)

@@ -19,6 +19,7 @@ from strategy_block.strategy_specs.v2.ast_nodes import (
     ConstExpr,
     CrossExpr,
     FeatureExpr,
+    PositionAttrExpr,
     NotExpr,
     expr_from_dict,
 )
@@ -84,6 +85,13 @@ class TestASTNodes:
         rebuilt = expr_from_dict(d)
         assert isinstance(rebuilt, FeatureExpr)
         assert rebuilt.name == "spread_bps"
+
+    def test_position_attr_roundtrip(self):
+        node = PositionAttrExpr(name="holding_ticks")
+        d = node.to_dict()
+        rebuilt = expr_from_dict(d)
+        assert isinstance(rebuilt, PositionAttrExpr)
+        assert rebuilt.name == "holding_ticks"
 
     def test_comparison_roundtrip(self):
         node = ComparisonExpr(feature="order_imbalance", op=">", threshold=0.3)
@@ -206,6 +214,21 @@ class TestStrategySpecV2:
         ])
         errors = spec.validate()
         assert any("invalid comparison op" in e for e in errors)
+
+    def test_invalid_position_attr_fails_validation(self):
+        spec = _minimal_spec(entry_policies=[
+            EntryPolicyV2(
+                name="bad", side="long",
+                trigger=ComparisonExpr(
+                    left=PositionAttrExpr("not_allowed"),
+                    op=">",
+                    threshold=0.0,
+                ),
+                strength=ConstExpr(0.5),
+            ),
+        ])
+        errors = spec.validate()
+        assert any("position_attr" in e for e in errors)
 
     def test_invalid_exit_action_fails_validation(self):
         spec = _minimal_spec(exit_policies=[

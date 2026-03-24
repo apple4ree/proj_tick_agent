@@ -95,7 +95,7 @@ class BacktestWorker:
             # 3) Load spec (version-pinned, gate-checked)
             spec = self.registry.load_spec_for_execution(name, version)
 
-            # 4) Compile (v1/v2 dispatch)
+            # 4) Compile (v2-only)
             def strategy_factory():
                 return compile_strategy(spec)
 

@@ -3,6 +3,7 @@
 # ==============================================
 
 generation:
+  spec_format: v2                # canonical default (v2 only)
   backend: template              # template | openai
   mode: live                     # live | mock | replay
   latency_ms: 1.0                # 기본 latency — spec holding period 보정용
@@ -10,6 +11,9 @@ generation:
   n_ideas: 3                     # 생성할 아이디어 수
   idea_index: 0                  # 선택할 아이디어 인덱스
   static_review_required: true   # false면 review skip (비권장)
+  allow_template_fallback: true # openai 실패 시 template fallback 허용
+  allow_heuristic_fallback: true # agent heuristic/static fallback 허용
+  fail_on_fallback: false       # true면 fallback 발생 시 generation 실패 처리
 
   # OpenAI backend 전용
   openai_model: gpt-4o

@@ -62,6 +62,7 @@ class CancelReplaceLogic:
         child: ChildOrder,
         state: MarketState,
         time_since_submit: float,
+        cancel_after_ticks: int | None = None,
     ) -> tuple[bool, str]:
         """
         Determine whether `child` should be cancelled.
@@ -70,9 +71,13 @@ class CancelReplaceLogic:
         -------
         (should_cancel, reason)
         """
-        # 1. 타임아웃
-        if time_since_submit >= self.timeout_seconds:
-            return True, f"timeout ({time_since_submit:.1f}s >= {self.timeout_seconds}s)"
+        # 1. 타임아웃 (optional signal override)
+        timeout_seconds = self.timeout_seconds
+        if cancel_after_ticks is not None and cancel_after_ticks > 0:
+            timeout_seconds = float(cancel_after_ticks)
+
+        if time_since_submit >= timeout_seconds:
+            return True, f"timeout ({time_since_submit:.1f}s >= {timeout_seconds}s)"
 
         # 2. 역선택
         if self.detect_adverse_selection(child, state):
@@ -149,6 +154,8 @@ class CancelReplaceLogic:
         open_orders: list[ChildOrder],
         state: MarketState,
         current_time: pd.Timestamp,
+        cancel_after_ticks: int | None = None,
+        max_reprices: int | None = None,
     ) -> list[dict]:
         """
         Evaluate every open order and return a list of action dictionaries.
@@ -169,7 +176,9 @@ class CancelReplaceLogic:
                 else 0.0
             )
 
-            cancel, reason = self.should_cancel(child, state, time_since)
+            cancel, reason = self.should_cancel(
+                child, state, time_since, cancel_after_ticks=cancel_after_ticks
+            )
             if cancel:
                 actions.append(
                     {"action": "cancel", "order": child, "new_price": None, "reason": reason}
@@ -178,9 +187,15 @@ class CancelReplaceLogic:
 
             replace, new_p = self.should_replace(child, state)
             if replace:
-                actions.append(
-                    {"action": "replace", "order": child, "new_price": new_p, "reason": "stale_price"}
-                )
+                reprice_count = int(child.meta.get("reprice_count", 0))
+                if max_reprices is not None and max_reprices >= 0 and reprice_count >= max_reprices:
+                    actions.append(
+                        {"action": "cancel", "order": child, "new_price": None, "reason": "max_reprices_reached"}
+                    )
+                else:
+                    actions.append(
+                        {"action": "replace", "order": child, "new_price": new_p, "reason": "stale_price"}
+                    )
             else:
                 actions.append(
                     {"action": "keep", "order": child, "new_price": None, "reason": ""}

@@ -1,0 +1,119 @@
+{
+  "name": "spread_absorption_reversal",
+  "version": "2.0",
+  "description": "Fade extreme imbalance when spread is wide — mean reversion on the assumption that the spread will compress.",
+  "spec_format": "v2",
+  "preconditions": [],
+  "entry_policies": [
+    {
+      "name": "fade_sell_pressure",
+      "side": "long",
+      "trigger": {
+        "type": "all",
+        "children": [
+          {
+            "type": "comparison",
+            "op": ">",
+            "threshold": 10.0,
+            "feature": "spread_bps"
+          },
+          {
+            "type": "comparison",
+            "op": "<",
+            "threshold": -0.4,
+            "feature": "order_imbalance"
+          }
+        ]
+      },
+      "strength": {
+        "type": "const",
+        "value": 0.5
+      },
+      "constraints": {
+        "cooldown_ticks": 100,
+        "no_reentry_until_flat": false
+      }
+    },
+    {
+      "name": "fade_buy_pressure",
+      "side": "short",
+      "trigger": {
+        "type": "all",
+        "children": [
+          {
+            "type": "comparison",
+            "op": ">",
+            "threshold": 10.0,
+            "feature": "spread_bps"
+          },
+          {
+            "type": "comparison",
+            "op": ">",
+            "threshold": 0.4,
+            "feature": "order_imbalance"
+          }
+        ]
+      },
+      "strength": {
+        "type": "const",
+        "value": 0.5
+      },
+      "constraints": {
+        "cooldown_ticks": 100,
+        "no_reentry_until_flat": false
+      }
+    }
+  ],
+  "exit_policies": [
+    {
+      "name": "spread_normalized",
+      "rules": [
+        {
+          "name": "spread_compress",
+          "priority": 1,
+          "condition": {
+            "type": "comparison",
+            "op": "<",
+            "threshold": 3.0,
+            "feature": "spread_bps"
+          },
+          "action": {
+            "type": "close_all"
+          }
+        },
+        {
+          "name": "imbalance_flip",
+          "priority": 2,
+          "condition": {
+            "type": "comparison",
+            "op": ">",
+            "threshold": 0.3,
+            "feature": "order_imbalance"
+          },
+          "action": {
+            "type": "close_all"
+          }
+        }
+      ]
+    }
+  ],
+  "risk_policy": {
+    "max_position": 300,
+    "inventory_cap": 600,
+    "position_sizing": {
+      "mode": "fixed",
+      "base_size": 100,
+      "max_size": 300
+    }
+  },
+  "regimes": [],
+  "metadata": {
+    "pipeline": "v2_template_lowering",
+    "template_name": "spread_absorption_reversal",
+    "research_goal": "short-horizon scalping alpha with passive entry, fast time exit, and strict spread filter",
+    "idea_name": "spread_absorption_reversal",
+    "latency_ms": 1.0,
+    "spec_canonical": "v2",
+    "generated_at": "2026-03-24T02:07:39.377008+00:00"
+  }
+}

@@ -1,10 +1,4 @@
-"""
-전략 사양 검토 스크립트.
-
-사용법:
-    cd /home/dgu/tick/proj_rl_agent
-    PYTHONPATH=src python scripts/review_strategy.py strategies/imbalance_momentum_v1.0.json
-"""
+"""전략 사양 검토 스크립트 (StrategySpec v2 only)."""
 from __future__ import annotations
 
 import argparse
@@ -18,20 +12,20 @@ for path in (PROJECT_ROOT, SRC_ROOT):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from strategy_block.strategy_specs.schema import StrategySpec
-from strategy_block.strategy_review import StrategyReviewer, ReviewResult
+from strategy_block.strategy_specs.v2.schema_v2 import StrategySpecV2
+from strategy_block.strategy_review.v2.reviewer_v2 import StrategyReviewerV2
+from strategy_block.strategy_review.review_common import ReviewResult
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Review strategy specifications")
-    parser.add_argument("spec_path", help="Path to strategy spec JSON")
+    parser = argparse.ArgumentParser(description="Review StrategySpec v2 JSON")
+    parser.add_argument("spec_path", help="Path to strategy spec JSON (v2)")
     return parser.parse_args()
 
 
-def print_review(spec: StrategySpec, result: ReviewResult) -> None:
-    """Print review results for a single spec."""
+def print_review(spec: StrategySpecV2, result: ReviewResult) -> None:
     print(f"\n{'─' * 50}")
-    print(f"Reviewing: {spec.name} (v{spec.version})")
+    print(f"Reviewing: {spec.name} (v{spec.version}, format=v2)")
     print(f"{'─' * 50}")
 
     status = "PASSED" if result.passed else "FAILED"
@@ -52,12 +46,13 @@ def main() -> None:
     args = parse_args()
     logging.basicConfig(level=logging.WARNING)
 
-    reviewer = StrategyReviewer()
-    spec = StrategySpec.load(args.spec_path)
+    spec_path = Path(args.spec_path)
+    spec = StrategySpecV2.load(spec_path)
+    reviewer = StrategyReviewerV2()
+
     result = reviewer.review(spec)
     print_review(spec, result)
 
-    # Machine-friendly output for shell script parsing
     status = "PASSED" if result.passed else "FAILED"
     print(f"REVIEW_STATUS={status}")
 
