@@ -46,11 +46,15 @@ class TestFlatConstruction:
             impact_model="sqrt",
             slicing_algo="POV",
             placement_style="aggressive",
+            queue_model="none",
+            queue_position_assumption=0.3,
         )
         assert cfg.fee.type == "zero"
         assert cfg.impact.type == "sqrt"
         assert cfg.slicing.algo == "POV"
         assert cfg.placement.style == "aggressive"
+        assert cfg.exchange.queue_model == "none"
+        assert cfg.exchange.queue_position_assumption == 0.3
 
 
 class TestNestedConstruction:
@@ -126,6 +130,24 @@ class TestValidation:
                 start_date="2026-03-13",
                 end_date="2026-03-13",
                 slicing=SlicingConfig(algo="invalid"),
+            )
+
+    def test_invalid_queue_model_raises(self):
+        with pytest.raises(ValueError, match="exchange.queue_model must be"):
+            BacktestConfig(
+                symbol="005930",
+                start_date="2026-03-13",
+                end_date="2026-03-13",
+                exchange=ExchangeConfig(queue_model="invalid"),
+            )
+
+    def test_invalid_queue_position_assumption_raises(self):
+        with pytest.raises(ValueError, match="queue_position_assumption"):
+            BacktestConfig(
+                symbol="005930",
+                start_date="2026-03-13",
+                end_date="2026-03-13",
+                exchange=ExchangeConfig(queue_position_assumption=1.1),
             )
 
     def test_invalid_initial_cash_raises(self):

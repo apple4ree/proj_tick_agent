@@ -18,8 +18,11 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from data.layer0_data.market_state import LOBLevel, LOBSnapshot, MarketState
+from execution_planning.layer1_signal import Signal
+from execution_planning.layer4_execution.cancel_replace import CancelReplaceLogic
 from evaluation_orchestration.layer7_validation import BacktestConfig, PipelineRunner
 from strategy_block.strategy_compiler import compile_strategy
+from strategy_block.strategy import Strategy
 from strategy_block.strategy_specs.v2.ast_nodes import (
     ComparisonExpr,
     ConstExpr,
@@ -296,3 +299,162 @@ def test_stronger_runner_regression_with_position_attr_regime_state_policy():
     assert rt.state_vars["entry_count"] >= 1.0
     assert rt.state_vars["flatten_count"] >= 1.0
     assert rt.position_size == 0.0
+
+
+class _PassiveJoinOneShotStrategy(Strategy):
+    def __init__(self) -> None:
+        self._emitted = False
+
+    @property
+    def name(self) -> str:
+        return "passive_join_one_shot"
+
+    def reset(self) -> None:
+        self._emitted = False
+
+    def generate_signal(self, state: MarketState):
+        if self._emitted:
+            return None
+        self._emitted = True
+        return Signal(
+            timestamp=state.timestamp,
+            symbol=state.symbol,
+            score=0.9,
+            expected_return=4.0,
+            confidence=0.95,
+            horizon_steps=1,
+            tags={"placement_mode": "passive_join", "cancel_after_ticks": 1, "max_reprices": 1},
+            is_valid=True,
+        )
+
+
+class _LegacyTimeoutCancelReplace(CancelReplaceLogic):
+    # Legacy behavior: timeout is a hard cancel even for passive_join.
+
+    def should_cancel(
+        self,
+        child,
+        state,
+        time_since_submit: float,
+        cancel_after_ticks: int | None = None,
+        placement_mode: str | None = None,
+    ) -> tuple[bool, str]:
+        timeout_seconds = self.timeout_seconds
+        if cancel_after_ticks is not None and cancel_after_ticks > 0:
+            timeout_seconds = cancel_after_ticks * (self.tick_interval_ms / 1000.0)
+        if time_since_submit >= timeout_seconds:
+            return True, f"timeout ({time_since_submit:.1f}s >= {timeout_seconds}s)"
+        return super().should_cancel(
+            child=child,
+            state=state,
+            time_since_submit=time_since_submit,
+            cancel_after_ticks=cancel_after_ticks,
+            placement_mode=placement_mode,
+        )
+
+
+def _make_states_for_passive_join_timeout_compare() -> list[MarketState]:
+    start = pd.Timestamp("2026-03-12 09:00:00")
+    states: list[MarketState] = []
+
+    states.append(
+        MarketState(
+            timestamp=start,
+            symbol="TEST",
+            lob=LOBSnapshot(
+                timestamp=start,
+                bid_levels=[LOBLevel(price=100.0, volume=8000), LOBLevel(price=99.9, volume=4000)],
+                ask_levels=[LOBLevel(price=100.01, volume=7000), LOBLevel(price=100.11, volume=4000)],
+            ),
+            tradable=True,
+            session="regular",
+        )
+    )
+
+    states.append(
+        MarketState(
+            timestamp=start + pd.Timedelta(seconds=1),
+            symbol="TEST",
+            lob=LOBSnapshot(
+                timestamp=start + pd.Timedelta(seconds=1),
+                bid_levels=[LOBLevel(price=100.0, volume=8000), LOBLevel(price=99.9, volume=4000)],
+                ask_levels=[LOBLevel(price=100.01, volume=7000), LOBLevel(price=100.11, volume=4000)],
+            ),
+            tradable=True,
+            session="regular",
+        )
+    )
+
+    states.append(
+        MarketState(
+            timestamp=start + pd.Timedelta(seconds=2),
+            symbol="TEST",
+            lob=LOBSnapshot(
+                timestamp=start + pd.Timedelta(seconds=2),
+                bid_levels=[LOBLevel(price=100.0, volume=8000), LOBLevel(price=99.9, volume=4000)],
+                ask_levels=[LOBLevel(price=100.01, volume=7000), LOBLevel(price=100.11, volume=4000)],
+                last_trade_price=100.0,
+                last_trade_volume=20000,
+            ),
+            tradable=True,
+            session="regular",
+        )
+    )
+
+    states.append(
+        MarketState(
+            timestamp=start + pd.Timedelta(seconds=3),
+            symbol="TEST",
+            lob=LOBSnapshot(
+                timestamp=start + pd.Timedelta(seconds=3),
+                bid_levels=[LOBLevel(price=100.0, volume=8000), LOBLevel(price=99.9, volume=4000)],
+                ask_levels=[LOBLevel(price=100.01, volume=7000), LOBLevel(price=100.11, volume=4000)],
+                last_trade_price=100.0,
+                last_trade_volume=20000,
+            ),
+            tradable=True,
+            session="regular",
+        )
+    )
+
+    return states
+
+
+def test_passive_join_old_vs_new_policy_comparison_on_same_signal():
+    states = _make_states_for_passive_join_timeout_compare()
+
+    config = BacktestConfig(
+        symbol="TEST",
+        start_date="2026-03-12",
+        end_date="2026-03-12",
+        seed=31,
+        placement_style="passive",
+        impact_model="linear",
+        latency_ms=100.0,
+    )
+
+    old_runner = PipelineRunner(config=config, data_dir=".", strategy=_PassiveJoinOneShotStrategy())
+    old_setup = old_runner._setup_components
+
+    def _old_setup_with_override(cfg):
+        old_setup(cfg)
+        old_runner._timing_logic.interval_seconds = 10.0
+        old_runner._timing_logic.deadline_urgency_seconds = -1.0
+        old_runner._cancel_replace = _LegacyTimeoutCancelReplace(tick_interval_ms=config.latency_ms)
+
+    old_runner._setup_components = _old_setup_with_override
+    old_result = old_runner.run(states)
+
+    new_runner = PipelineRunner(config=config, data_dir=".", strategy=_PassiveJoinOneShotStrategy())
+    new_setup = new_runner._setup_components
+
+    def _new_setup_with_override(cfg):
+        new_setup(cfg)
+        new_runner._timing_logic.interval_seconds = 10.0
+        new_runner._timing_logic.deadline_urgency_seconds = -1.0
+
+    new_runner._setup_components = _new_setup_with_override
+    new_result = new_runner.run(states)
+
+    assert new_result.execution_report.cancel_rate < old_result.execution_report.cancel_rate
+    assert new_result.n_fills > old_result.n_fills

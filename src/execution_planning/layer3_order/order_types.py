@@ -74,6 +74,15 @@ class ChildOrder:
     fill_time: Optional[pd.Timestamp] = None
     cancel_time: Optional[pd.Timestamp] = None
     arrival_mid: Optional[float] = None    # mid price at time of submission
+    # Queue-position approximation metadata (passive orders only)
+    queue_ahead_qty: float = 0.0
+    queue_enter_ts: Optional[pd.Timestamp] = None
+    queue_price: Optional[float] = None
+    queue_side: Optional[str] = None
+    queue_initialized: bool = False
+    queue_model: Optional[str] = None
+    initial_level_qty: float = 0.0
+    queue_last_level_qty: float = 0.0
     meta: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -85,6 +94,11 @@ class ChildOrder:
             self.submit_time = self.submitted_time
         elif self.submit_time is not None and self.submitted_time is None:
             self.submitted_time = self.submit_time
+
+        if self.queue_price is None and self.price is not None:
+            self.queue_price = self.price
+        if self.queue_side is None:
+            self.queue_side = self.side.value
 
     @property
     def remaining_qty(self) -> int:

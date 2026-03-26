@@ -1,4 +1,8 @@
-"""Lowers intermediate template dicts into StrategySpecV2.
+"""Lowers intermediate representations into StrategySpecV2.
+
+Supports two input formats:
+1. Template dicts (from templates_v2.py) via lower_to_spec_v2()
+2. StrategyPlan (from OpenAI structured output) via lower_plan_to_spec_v2()
 
 Phase 3 additions:
 - state_policy lowering
@@ -8,7 +12,10 @@ Phase 3 additions:
 """
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from strategy_block.strategy_specs.v2.ast_nodes import (
     AllExpr,
@@ -355,5 +362,277 @@ def lower_to_spec_v2(template: dict[str, Any]) -> StrategySpecV2:
         metadata={
             "pipeline": "v2_template_lowering",
             "template_name": template["name"],
+        },
+    )
+
+
+# ── Plan-based lowering (OpenAI structured output) ──────────────────
+
+
+def _condition_plan_to_expr(cond: Any) -> ExprNode:
+    """Convert a ConditionPlan to an ExprNode.
+
+    Handles all condition types from the plan schema.
+    """
+    # Composite (all / any)
+    if cond.combine is not None and cond.children:
+        children = [_condition_plan_to_expr(c) for c in cond.children]
+        if cond.combine == "any":
+            return AnyExpr(children=children)
+        return AllExpr(children=children)
+
+    # Cross condition
+    if cond.cross_feature is not None:
+        return CrossExpr(
+            feature=cond.cross_feature,
+            threshold=cond.cross_threshold or 0.0,
+            direction=cond.cross_direction or "above",
+        )
+
+    # Persist condition
+    if cond.persist_condition is not None:
+        inner = _condition_plan_to_expr(cond.persist_condition)
+        return PersistExpr(
+            expr=inner,
+            window=cond.persist_window or 5,
+            min_true=cond.persist_min_true or 3,
+        )
+
+    # Rolling comparison
+    if cond.rolling_feature is not None:
+        rolling_node = RollingExpr(
+            feature=cond.rolling_feature,
+            method=cond.rolling_method or "mean",
+            window=cond.rolling_window or 5,
+        )
+        if cond.op and cond.threshold is not None:
+            return ComparisonExpr(
+                left=rolling_node,
+                op=cond.op,
+                threshold=cond.threshold,
+            )
+        return rolling_node
+
+    # State variable comparison
+    if cond.state_var is not None:
+        left = StateVarExpr(name=cond.state_var)
+        return ComparisonExpr(
+            left=left,
+            op=cond.op or ">=",
+            threshold=cond.threshold or 0.0,
+        )
+
+    # Position attribute comparison
+    if cond.position_attr is not None:
+        left = PositionAttrExpr(name=cond.position_attr)
+        return ComparisonExpr(
+            left=left,
+            op=cond.op or ">=",
+            threshold=cond.threshold or 0.0,
+        )
+
+    # Simple feature comparison (default)
+    if cond.feature is not None:
+        return ComparisonExpr(
+            feature=cond.feature,
+            op=cond.op or ">",
+            threshold=cond.threshold or 0.0,
+        )
+
+    logger.warning("ConditionPlan has no recognizable condition type, defaulting to const true")
+    return ConstExpr(value=1.0)
+
+
+def _lower_plan_entry(entry: Any) -> EntryPolicyV2:
+    """Lower an EntryPlan to EntryPolicyV2."""
+    trigger = _condition_plan_to_expr(entry.trigger)
+
+    return EntryPolicyV2(
+        name=entry.name,
+        side=entry.side,
+        trigger=trigger,
+        strength=ConstExpr(value=entry.strength),
+        constraints=EntryConstraints(
+            cooldown_ticks=entry.cooldown_ticks,
+            no_reentry_until_flat=entry.no_reentry_until_flat,
+        ),
+    )
+
+
+def _lower_plan_exit_rule(rule: Any) -> ExitRuleV2:
+    """Lower an ExitRulePlan to ExitRuleV2."""
+    condition = _condition_plan_to_expr(rule.condition)
+
+    if rule.action == "reduce_position":
+        action = ExitActionV2(
+            type="reduce_position",
+            reduce_fraction=rule.reduce_fraction or 0.5,
+        )
+    else:
+        action = ExitActionV2(type=rule.action or "close_all")
+
+    return ExitRuleV2(
+        name=rule.name,
+        priority=rule.priority,
+        condition=condition,
+        action=action,
+    )
+
+
+def _lower_plan_risk(risk: Any) -> RiskPolicyV2:
+    """Lower a RiskPlan to RiskPolicyV2."""
+    degradation_rules = []
+    for r in risk.degradation_rules:
+        degradation_rules.append(
+            RiskDegradationRuleV2(
+                condition=_condition_plan_to_expr(r.condition),
+                action=RiskDegradationActionV2(
+                    type=r.action_type,
+                    factor=r.factor,
+                ),
+            )
+        )
+
+    return RiskPolicyV2(
+        max_position=risk.max_position,
+        inventory_cap=risk.inventory_cap,
+        position_sizing=PositionSizingV2(
+            mode=risk.sizing_mode,
+            base_size=risk.base_size,
+            max_size=risk.max_size,
+        ),
+        degradation_rules=degradation_rules,
+    )
+
+
+def _lower_plan_execution(ep: Any) -> ExecutionPolicyV2:
+    """Lower an ExecutionPlan to ExecutionPolicyV2."""
+    dnt = None
+    if ep.do_not_trade_when is not None:
+        dnt = _condition_plan_to_expr(ep.do_not_trade_when)
+
+    adaptation_rules = []
+    for r in ep.adaptation_rules:
+        adaptation_rules.append(
+            ExecutionAdaptationRuleV2(
+                condition=_condition_plan_to_expr(r.condition),
+                override=ExecutionAdaptationOverrideV2(
+                    placement_mode=r.placement_mode,
+                    cancel_after_ticks=r.cancel_after_ticks,
+                    max_reprices=r.max_reprices,
+                ),
+            )
+        )
+
+    return ExecutionPolicyV2(
+        placement_mode=ep.placement_mode,
+        cancel_after_ticks=ep.cancel_after_ticks,
+        max_reprices=ep.max_reprices,
+        do_not_trade_when=dnt,
+        adaptation_rules=adaptation_rules,
+    )
+
+
+def _lower_plan_regime(regime: Any) -> RegimeV2:
+    """Lower a RegimePlan to RegimeV2."""
+    return RegimeV2(
+        name=regime.name,
+        priority=regime.priority,
+        when=_condition_plan_to_expr(regime.when),
+        entry_policy_refs=regime.entry_policy_refs,
+        exit_policy_ref=regime.exit_policy_ref,
+    )
+
+
+def _lower_plan_state(sp: Any) -> StatePolicyV2:
+    """Lower a StatePlan to StatePolicyV2.
+
+    ``sp.vars`` is a ``list[StateVarPlan]`` (OpenAI-compatible).
+    StrategySpecV2 expects ``dict[str, float]``.
+    """
+    guards = [
+        StateGuardV2(
+            name=g.name,
+            condition=_condition_plan_to_expr(g.condition),
+            effect=g.effect,
+        )
+        for g in sp.guards
+    ]
+
+    events: list[StateEventV2] = []
+    for e in sp.events:
+        updates = [
+            StateUpdateV2(var=u.var, op=u.op, value=u.value)
+            for u in e.updates
+        ]
+        events.append(StateEventV2(name=e.name, on=e.on, updates=updates))
+
+    # Convert list[StateVarPlan] → dict[str, float]
+    vars_dict: dict[str, float] = {}
+    for sv in sp.vars:
+        vars_dict[sv.name] = float(sv.initial_value)
+
+    return StatePolicyV2(
+        vars=vars_dict,
+        guards=guards,
+        events=events,
+    )
+
+
+def lower_plan_to_spec_v2(
+    plan: Any,
+    *,
+    latency_ms: float = 1.0,
+) -> StrategySpecV2:
+    """Convert a StrategyPlan (OpenAI output) into a StrategySpecV2.
+
+    This is the plan-path equivalent of lower_to_spec_v2 (template path).
+    """
+    preconditions = [
+        PreconditionV2(
+            name=pc.name,
+            condition=_condition_plan_to_expr(pc.condition),
+        )
+        for pc in plan.preconditions
+    ]
+
+    entry_policies = [_lower_plan_entry(e) for e in plan.entry_policies]
+
+    exit_policies = [
+        ExitPolicyV2(
+            name=xp.name,
+            rules=[_lower_plan_exit_rule(r) for r in xp.rules],
+        )
+        for xp in plan.exit_policies
+    ]
+
+    risk_policy = _lower_plan_risk(plan.risk_policy)
+
+    regimes = [_lower_plan_regime(r) for r in plan.regimes]
+
+    execution_policy = None
+    if plan.execution_policy is not None:
+        execution_policy = _lower_plan_execution(plan.execution_policy)
+
+    state_policy = None
+    if plan.state_policy is not None:
+        state_policy = _lower_plan_state(plan.state_policy)
+
+    return StrategySpecV2(
+        name=plan.name,
+        version="2.0",
+        description=plan.description,
+        spec_format="v2",
+        preconditions=preconditions,
+        entry_policies=entry_policies,
+        exit_policies=exit_policies,
+        risk_policy=risk_policy,
+        regimes=regimes,
+        execution_policy=execution_policy,
+        state_policy=state_policy,
+        metadata={
+            "pipeline": "v2_openai_plan_lowering",
+            "plan_name": plan.name,
+            "plan_style": plan.strategy_style,
         },
     )

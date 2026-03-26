@@ -105,12 +105,23 @@ class OpenAIStrategyGenClient:
         system_prompt: str,
         user_prompt: str,
         schema: type[T],
+        mock_factory: Any | None = None,
     ) -> T | None:
         """Query the LLM and parse response into a Pydantic model.
 
         Returns None on failure after retries.
+        If mock_factory is provided and mode is 'mock', calls it to produce
+        a deterministic response instead of returning None.
         """
         if self.mode == "mock":
+            if mock_factory is not None:
+                result = mock_factory()
+                self.last_query_meta = {
+                    "mode": self.mode,
+                    "status": "mock_factory",
+                    "reason": "mock mode — used provided factory",
+                }
+                return result
             self.last_query_meta = {
                 "mode": self.mode,
                 "status": "mock_no_call",

@@ -37,13 +37,21 @@ AST 기반 조건식은 feature/state/position context를 평가해 entry/exit/r
 ```text
 spec(v2)
   -> compile_strategy
-  -> signal generation
-  -> target position
-  -> order planning
-  -> execution simulation
+  -> signal generation      (observed_state: delayed market data)
+  -> target position         (observed_state)
+  -> order planning          (observed_state)
+  -> execution simulation    (true_state: current market data)
   -> fill/bookkeeping
   -> pnl/metrics/report
 ```
+
+`PipelineRunner` maintains per-symbol state history and performs a
+`bisect`-based lookup to derive `observed_state` from `true_state - market_data_delay_ms`.
+When `market_data_delay_ms=0`, `observed_state == true_state` (zero-cost fast path).
+
+Queue-position semantics are owned exclusively by `FillSimulator` via
+explicit `QueueModel` interfaces (`queue_models/` package).
+`MatchingEngine` (layer 5) is queue-free and handles pure price/qty matching.
 
 ## 5) Generation Path
 

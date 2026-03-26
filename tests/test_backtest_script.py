@@ -152,6 +152,9 @@ def test_backtest_config_from_cfg():
             "initial_cash": 5e7,
             "seed": 99,
             "fee_model": "zero",
+            "exchange_model": "partial_fill",
+            "queue_model": "none",
+            "queue_position_assumption": 0.25,
         },
     }
     bc = backtest.backtest_config_from_cfg(
@@ -161,3 +164,79 @@ def test_backtest_config_from_cfg():
     assert bc.initial_cash == 5e7
     assert bc.seed == 99
     assert bc.fee_model == "zero"
+    assert bc.exchange_model == "partial_fill"
+    assert bc.queue_model == "none"
+    assert bc.queue_position_assumption == 0.25
+
+
+# ---------------------------------------------------------------------------
+# market_data_delay_ms propagation tests
+# ---------------------------------------------------------------------------
+
+
+def test_build_config_propagates_market_data_delay_ms():
+    """build_config() must forward market_data_delay_ms to BacktestConfig."""
+    backtest = _load_backtest_module()
+    import argparse
+
+    args = argparse.Namespace(
+        symbol="005930",
+        start_date="20260313",
+        end_date=None,
+    )
+    bt_cfg = {"market_data_delay_ms": 250.0}
+    config = backtest.build_config(args, bt_cfg)
+    assert config.market_data_delay_ms == 250.0
+
+
+def test_build_config_defaults_delay_to_zero():
+    """build_config() defaults market_data_delay_ms to 0.0 when absent."""
+    backtest = _load_backtest_module()
+    import argparse
+
+    args = argparse.Namespace(
+        symbol="005930",
+        start_date="20260313",
+        end_date=None,
+    )
+    config = backtest.build_config(args, {})
+    assert config.market_data_delay_ms == 0.0
+
+
+def test_backtest_config_from_cfg_propagates_market_data_delay_ms():
+    """backtest_config_from_cfg() must forward market_data_delay_ms."""
+    backtest = _load_backtest_module()
+    cfg = {
+        "backtest": {
+            "market_data_delay_ms": 500.0,
+        },
+    }
+    bc = backtest.backtest_config_from_cfg(
+        cfg, symbol="005930", start_date="20260313",
+    )
+    assert bc.market_data_delay_ms == 500.0
+
+
+def test_backtest_config_from_cfg_defaults_delay_to_zero():
+    """backtest_config_from_cfg() defaults market_data_delay_ms to 0.0."""
+    backtest = _load_backtest_module()
+    cfg = {"backtest": {}}
+    bc = backtest.backtest_config_from_cfg(
+        cfg, symbol="005930", start_date="20260313",
+    )
+    assert bc.market_data_delay_ms == 0.0
+
+
+def test_backtest_config_from_cfg_override_takes_precedence():
+    """Keyword override for market_data_delay_ms wins over config."""
+    backtest = _load_backtest_module()
+    cfg = {
+        "backtest": {
+            "market_data_delay_ms": 100.0,
+        },
+    }
+    bc = backtest.backtest_config_from_cfg(
+        cfg, symbol="005930", start_date="20260313",
+        market_data_delay_ms=999.0,
+    )
+    assert bc.market_data_delay_ms == 999.0

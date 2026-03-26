@@ -108,7 +108,7 @@ class TestReviewerV2:
         result = reviewer.review(spec)
         assert any(i.category == "risk_inconsistency" for i in result.issues)
 
-    def test_missing_close_all_warning(self):
+    def test_missing_close_all_error(self):
         reviewer = StrategyReviewerV2()
         spec = _valid_spec(exit_policies=[
             ExitPolicyV2(name="exits", rules=[
@@ -120,7 +120,11 @@ class TestReviewerV2:
             ]),
         ])
         result = reviewer.review(spec)
-        assert any(i.category == "exit_completeness" for i in result.issues)
+        assert not result.passed
+        assert any(
+            i.category == "exit_completeness" and i.severity == "error"
+            for i in result.issues
+        )
 
     def test_unknown_feature_info(self):
         reviewer = StrategyReviewerV2()

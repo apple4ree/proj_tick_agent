@@ -12,6 +12,30 @@ Phase 3 adds:
 - `state_var` expression evaluation
 - `position_attr` expression evaluation
 - `comparison.left` expression support
+
+Observation lag interaction
+--------------------------
+When ``market_data_delay_ms > 0``, PipelineRunner feeds the strategy an
+``observed_state`` that is a historical snapshot (not the current market).
+All features extracted from that state are *already delayed* before they
+reach this evaluator.
+
+This means ``LagExpr``, ``RollingExpr``, and ``PersistExpr`` operate on
+the **observation-delayed** feature history.  The two lag sources stack:
+
+    effective_lookback = observation_delay + strategy_lag_steps × resample_interval
+
+For example, with ``market_data_delay_ms=2000`` and ``LagExpr(steps=2)``
+at 1-second resolution, the strategy effectively sees data from ~4 seconds
+behind true wall-clock time.
+
+This is the intended design: the runtime evaluator is stateless with respect
+to the source of its input features; it does not need to distinguish between
+"fresh" and "delayed" data.  The observation-lag semantics are enforced
+upstream by PipelineRunner, not here.
+
+See ``tests/test_backtest_realism.py::TestRuntimeLagSemantics`` for tests
+covering this stacking behavior.
 """
 from __future__ import annotations
 

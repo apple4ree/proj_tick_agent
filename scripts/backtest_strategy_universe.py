@@ -46,7 +46,7 @@ for path in (PROJECT_ROOT, SRC_ROOT):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from data.layer0_data import DataIngester, MarketStateBuilder
+from data.layer0_data import DataIngester, MarketStateBuilder, validate_resample_freq
 from evaluation_orchestration.layer7_validation import BacktestConfig, PipelineRunner
 from evaluation_orchestration.layer7_validation.backtest_config import LatencyConfig
 from strategy_block.strategy_compiler import compile_strategy
@@ -202,12 +202,13 @@ def run_single_backtest(
     t0 = time.monotonic()
 
     # Build latency config from ms value
+    derived_market_data_delay_ms = latency_ms * 0.1
     latency_config = LatencyConfig(
         profile="default",
         order_submit_ms=latency_ms * 0.3,
         order_ack_ms=latency_ms * 0.7,
         cancel_ms=latency_ms * 0.2,
-        market_data_delay_ms=latency_ms * 0.1,
+        market_data_delay_ms=derived_market_data_delay_ms,
         add_jitter=latency_ms > 0,
         jitter_std_ms=max(0.01, latency_ms * 0.05),
     )
@@ -219,6 +220,7 @@ def run_single_backtest(
         initial_cash=initial_cash,
         seed=seed,
         latency=latency_config,
+        market_data_delay_ms=derived_market_data_delay_ms,
         compute_attribution=compute_attribution,
     )
 
@@ -282,6 +284,7 @@ def main() -> None:
     initial_cash = bt.get("initial_cash", 1e8)
     seed = bt.get("seed", 42)
     resample = bt.get("resample", "1s")
+    validate_resample_freq(resample)
     base_output_dir = paths.get("outputs_dir", "outputs") + "/universe_backtest"
 
     # Load and compile strategy (v2-only)

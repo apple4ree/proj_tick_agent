@@ -66,6 +66,7 @@ def _run_direct_with_config(tmp_path: Path, extra_paths: dict | None = None) -> 
         goal="order imbalance alpha",
         backend=None,
         mode=None,
+        model=None,
         auto_approve=None,
         config=None,
         profile=None,

@@ -5,18 +5,35 @@
 # 스크립트, 워커, PipelineRunner 모두가 이 값을 공유합니다.
 #
 # 워커/오케스트레이션 전용 설정 → backtest_worker.yaml
-# qlib 스타일 상세 설정 (config stack 미포함) → backtest_core.yaml
+# qlib 스타일 상세 설정 (config stack 미포함) → advanced/backtest_core.yaml
 
 backtest:
   initial_cash: 100000000        # KRW (1e8)
   seed: 42
+  # Supported resample resolutions (current phase):
+  #   "1s"    — default public baseline
+  #   "500ms" — the only realism-oriented resolution in this phase
+  # Other sub-second values (100ms, 250ms, …) are NOT supported.
   resample: "1s"
   trade_lookback: 100
 
   # 단일 백테스트 기본값
-  latency_ms: 1.0
+  # NOTE: latency_ms is order-to-ack delay (milliseconds), NOT the tick interval.
+  # Tick interval is derived from `resample` above (1s → 1000ms, 500ms → 500ms).
+  # cancel_after_ticks uses the tick interval, not latency_ms.
+  latency_ms: 100.0
   fee_model: krx
   impact_model: linear
   slicing_algo: TWAP
   placement_style: spread_adaptive
+  exchange_model: partial_fill
+  # Queue models (handled by FillSimulator):
+  # none | price_time | risk_adverse | prob_queue | random | pro_rata
+  queue_model: risk_adverse
+  queue_position_assumption: 0.5
+  # Observation lag: strategy sees market data delayed by this amount (ms).
+  # 0.0 = no delay (current behavior). Actual past-state lookup, not timestamp shift.
+  # At "1s" resolution, small delays (< 1000ms) often collapse to the same state.
+  # At "500ms" resolution, moderate delays (>= 200ms) yield distinct observed_state.
+  market_data_delay_ms: 0.0
   compute_attribution: true

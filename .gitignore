@@ -1,7 +1,12 @@
+# Generated artifacts — runtime directories, not tracked by git.
+# Code creates these with mkdir(parents=True, exist_ok=True) as needed.
 outputs/
 logs/
+jobs/
 checkpoints/
 experiments/
+
+# Python caches
 .pytest_cache/
 __pycache__/
 *.py[cod]

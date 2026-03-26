@@ -8,15 +8,14 @@
 - `strategies/`: runtime registry
 - `strategies/examples/`: reference v2 examples
 - `tests/`: pytest suites
-- `outputs/`: 실행 산출물(코드 본체 아님)
-- `experiments/`, `checkpoints/`: 실험/학습 산출물(코드 본체 아님)
+- `docs/`: 문서 (COMMANDS, history)
 
 ## `src/` Subtrees
 
 - `src/data/`
   - layer0 데이터 적재/정제/동기화/상태 생성
 - `src/strategy_block/`
-  - `strategy_generation/` v2 전략 생성
+  - `strategy_generation/` v2 전략 생성 (template_v2 + openai_v2 dual backend)
   - `strategy_review/` v2 정적 검토
   - `strategy_specs/` v2 spec/AST
   - `strategy_registry/` spec+metadata 저장소
@@ -30,10 +29,11 @@
 
 ## Scripts
 
-- generation: `scripts/generate_strategy.py`, `scripts/run_generation_worker.py`
+- generation: `scripts/generate_strategy.py`
 - review: `scripts/review_strategy.py`
 - backtest: `scripts/backtest.py`, `scripts/backtest_strategy_universe.py`
-- workers/launcher: `scripts/run_backtest_worker.py`, `scripts/run_local_stack.sh`, `scripts/run_generate_review_backtest.sh`
+- e2e launcher: `scripts/run_generate_review_backtest.sh`
+- internal: `scripts/internal/workers/`, `scripts/internal/ops/`, `scripts/internal/adhoc/`
 
 ## Current Operational Status
 
@@ -46,15 +46,15 @@
 
 Implemented:
 - v2 spec lifecycle (generate/review/save/load/compile/backtest)
+- dual generation backend: template_v2 (keyword→template→lower) + openai_v2 (goal→structured plan→lower→review)
 - registry metadata gate + worker orchestration
 
 Partial:
 - execution policy 일부는 hint-level/partial override
 - reviewer는 static/heuristic 점검
 
-Cleanup candidates:
-- outputs/experiments/checkpoints 산출물 주기적 정리
-- 문서/설정의 mixed change 분리 커밋
+Note:
+- outputs/logs/jobs/experiments/checkpoints는 런타임 산출물 (git 미추적, 코드가 필요 시 자동 생성)
 
 ## Examples Directory Role
 

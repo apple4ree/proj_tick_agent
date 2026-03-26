@@ -1,25 +1,29 @@
 # ==============================================
 # 전략 생성 설정 (Generation Plane)
 # ==============================================
+#
+# backend=template : goal keyword → template 선택 → lower_to_spec_v2 → review
+# backend=openai   : goal → OpenAI structured plan → lower_plan_to_spec_v2 → review
+#   (PlanParseError 시 allow_template_fallback=true 이면 template 경로로 fallback)
 
 generation:
   spec_format: v2                # canonical default (v2 only)
   backend: template              # template | openai
-  mode: live                     # live | mock | replay
+  mode: live                     # live | mock | replay  (openai backend 전용)
   latency_ms: 1.0                # 기본 latency — spec holding period 보정용
   auto_approve: false            # true면 생성 즉시 APPROVED 상태로 전환
-  n_ideas: 3                     # 생성할 아이디어 수
-  idea_index: 0                  # 선택할 아이디어 인덱스
+  n_ideas: 3                     # template: 생성할 아이디어 수 / openai: fallback 시 사용
+  idea_index: 0                  # template: 선택할 아이디어 인덱스 / openai: fallback 시 사용
   static_review_required: true   # false면 review skip (비권장)
-  allow_template_fallback: true # openai 실패 시 template fallback 허용
+  allow_template_fallback: true  # openai 실패(PlanParseError) 시 template fallback 허용
   allow_heuristic_fallback: true # agent heuristic/static fallback 허용
-  fail_on_fallback: false       # true면 fallback 발생 시 generation 실패 처리
+  fail_on_fallback: false        # true면 fallback 발생 시 generation 실패 처리
 
   # OpenAI backend 전용
-  openai_model: gpt-4o
+  openai_model: gpt-4o           # OpenAI model (또는 --model CLI arg로 override)
   openai_timeout: 60
   openai_max_retries: 2
-  replay_path: null              # replay 로그 경로
+  replay_path: null              # replay 모드 로그 경로 (JSON 파일)
 
   # 환경 변수로 API 키를 주입합니다 — YAML에 키를 넣지 마세요
   # OPENAI_API_KEY 환경 변수 사용

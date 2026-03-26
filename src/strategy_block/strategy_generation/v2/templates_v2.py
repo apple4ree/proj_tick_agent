@@ -69,11 +69,25 @@ def _imbalance_persist_momentum() -> dict[str, Any]:
                     {
                         "name": "stop_loss",
                         "priority": 1,
-                        "condition": {"feature": "order_imbalance", "op": "<", "threshold": -0.2},
+                        "condition": {
+                            "type": "comparison",
+                            "left": {"type": "position_attr", "name": "unrealized_pnl_bps"},
+                            "op": "<=", "threshold": -25.0,
+                        },
                         "action": "close_all",
                     },
                     {
                         "name": "time_exit",
+                        "priority": 2,
+                        "condition": {
+                            "type": "comparison",
+                            "left": {"type": "position_attr", "name": "holding_ticks"},
+                            "op": ">=", "threshold": 100.0,
+                        },
+                        "action": "close_all",
+                    },
+                    {
+                        "name": "spread_exit",
                         "priority": 3,
                         "condition": {"feature": "spread_bps", "op": ">", "threshold": 25.0},
                         "action": "close_all",
@@ -128,14 +142,34 @@ def _spread_absorption_reversal() -> dict[str, Any]:
                 "name": "spread_normalized",
                 "rules": [
                     {
-                        "name": "spread_compress",
+                        "name": "stop_loss",
                         "priority": 1,
+                        "condition": {
+                            "type": "comparison",
+                            "left": {"type": "position_attr", "name": "unrealized_pnl_bps"},
+                            "op": "<=", "threshold": -20.0,
+                        },
+                        "action": "close_all",
+                    },
+                    {
+                        "name": "time_exit",
+                        "priority": 2,
+                        "condition": {
+                            "type": "comparison",
+                            "left": {"type": "position_attr", "name": "holding_ticks"},
+                            "op": ">=", "threshold": 80.0,
+                        },
+                        "action": "close_all",
+                    },
+                    {
+                        "name": "spread_compress",
+                        "priority": 3,
                         "condition": {"feature": "spread_bps", "op": "<", "threshold": 3.0},
                         "action": "close_all",
                     },
                     {
                         "name": "imbalance_flip",
-                        "priority": 2,
+                        "priority": 4,
                         "condition": {"feature": "order_imbalance", "op": ">", "threshold": 0.3},
                         "action": "close_all",
                     },
@@ -189,8 +223,28 @@ def _cross_momentum() -> dict[str, Any]:
                 "name": "risk_exits",
                 "rules": [
                     {
-                        "name": "flow_reversal",
+                        "name": "stop_loss",
                         "priority": 1,
+                        "condition": {
+                            "type": "comparison",
+                            "left": {"type": "position_attr", "name": "unrealized_pnl_bps"},
+                            "op": "<=", "threshold": -25.0,
+                        },
+                        "action": "close_all",
+                    },
+                    {
+                        "name": "time_exit",
+                        "priority": 2,
+                        "condition": {
+                            "type": "comparison",
+                            "left": {"type": "position_attr", "name": "holding_ticks"},
+                            "op": ">=", "threshold": 80.0,
+                        },
+                        "action": "close_all",
+                    },
+                    {
+                        "name": "flow_reversal",
+                        "priority": 3,
                         "condition": {"feature": "trade_flow_imbalance", "op": "<", "threshold": -0.2},
                         "action": "close_all",
                     },
@@ -246,14 +300,34 @@ def _regime_filtered_persist_momentum() -> dict[str, Any]:
                 "name": "momentum_exits",
                 "rules": [
                     {
-                        "name": "reversal_stop",
+                        "name": "stop_loss",
                         "priority": 1,
+                        "condition": {
+                            "type": "comparison",
+                            "left": {"type": "position_attr", "name": "unrealized_pnl_bps"},
+                            "op": "<=", "threshold": -25.0,
+                        },
+                        "action": "close_all",
+                    },
+                    {
+                        "name": "time_exit",
+                        "priority": 2,
+                        "condition": {
+                            "type": "comparison",
+                            "left": {"type": "position_attr", "name": "holding_ticks"},
+                            "op": ">=", "threshold": 100.0,
+                        },
+                        "action": "close_all",
+                    },
+                    {
+                        "name": "reversal_stop",
+                        "priority": 3,
                         "condition": {"feature": "order_imbalance", "op": "<", "threshold": -0.15},
                         "action": "close_all",
                     },
                     {
                         "name": "spread_stop",
-                        "priority": 2,
+                        "priority": 4,
                         "condition": {"feature": "spread_bps", "op": ">", "threshold": 20.0},
                         "action": "close_all",
                     },
@@ -343,8 +417,28 @@ def _rolling_mean_reversion() -> dict[str, Any]:
                 "name": "reversion_exits",
                 "rules": [
                     {
-                        "name": "revert_complete",
+                        "name": "stop_loss",
                         "priority": 1,
+                        "condition": {
+                            "type": "comparison",
+                            "left": {"type": "position_attr", "name": "unrealized_pnl_bps"},
+                            "op": "<=", "threshold": -20.0,
+                        },
+                        "action": "close_all",
+                    },
+                    {
+                        "name": "time_exit",
+                        "priority": 2,
+                        "condition": {
+                            "type": "comparison",
+                            "left": {"type": "position_attr", "name": "holding_ticks"},
+                            "op": ">=", "threshold": 60.0,
+                        },
+                        "action": "close_all",
+                    },
+                    {
+                        "name": "revert_complete",
+                        "priority": 3,
                         "condition": {"feature": "order_imbalance", "op": ">", "threshold": 0.0},
                         "action": "close_all",
                     },
@@ -389,8 +483,28 @@ def _adaptive_execution_imbalance() -> dict[str, Any]:
                 "name": "adaptive_exits",
                 "rules": [
                     {
-                        "name": "imbalance_stop",
+                        "name": "stop_loss",
                         "priority": 1,
+                        "condition": {
+                            "type": "comparison",
+                            "left": {"type": "position_attr", "name": "unrealized_pnl_bps"},
+                            "op": "<=", "threshold": -25.0,
+                        },
+                        "action": "close_all",
+                    },
+                    {
+                        "name": "time_exit",
+                        "priority": 2,
+                        "condition": {
+                            "type": "comparison",
+                            "left": {"type": "position_attr", "name": "holding_ticks"},
+                            "op": ">=", "threshold": 80.0,
+                        },
+                        "action": "close_all",
+                    },
+                    {
+                        "name": "imbalance_stop",
+                        "priority": 3,
                         "condition": {"feature": "order_imbalance", "op": "<", "threshold": -0.1},
                         "action": "close_all",
                     },
@@ -505,14 +619,34 @@ def _stateful_cooldown_momentum() -> dict[str, Any]:
                 "name": "state_exits",
                 "rules": [
                     {
-                        "name": "momentum_break",
+                        "name": "stop_loss",
                         "priority": 1,
+                        "condition": {
+                            "type": "comparison",
+                            "left": {"type": "position_attr", "name": "unrealized_pnl_bps"},
+                            "op": "<=", "threshold": -25.0,
+                        },
+                        "action": "close_all",
+                    },
+                    {
+                        "name": "time_exit",
+                        "priority": 2,
+                        "condition": {
+                            "type": "comparison",
+                            "left": {"type": "position_attr", "name": "holding_ticks"},
+                            "op": ">=", "threshold": 100.0,
+                        },
+                        "action": "close_all",
+                    },
+                    {
+                        "name": "momentum_break",
+                        "priority": 3,
                         "condition": {"feature": "order_imbalance", "op": "<", "threshold": -0.1},
                         "action": "close_all",
                     },
                     {
                         "name": "wide_spread_exit",
-                        "priority": 2,
+                        "priority": 4,
                         "condition": {"feature": "spread_bps", "op": ">", "threshold": 22.0},
                         "action": "close_all",
                     },
@@ -579,14 +713,34 @@ def _loss_streak_degraded_reversion() -> dict[str, Any]:
                 "name": "degraded_exits",
                 "rules": [
                     {
-                        "name": "reversion_done",
+                        "name": "stop_loss",
                         "priority": 1,
+                        "condition": {
+                            "type": "comparison",
+                            "left": {"type": "position_attr", "name": "unrealized_pnl_bps"},
+                            "op": "<=", "threshold": -30.0,
+                        },
+                        "action": "close_all",
+                    },
+                    {
+                        "name": "time_exit",
+                        "priority": 2,
+                        "condition": {
+                            "type": "comparison",
+                            "left": {"type": "position_attr", "name": "holding_ticks"},
+                            "op": ">=", "threshold": 80.0,
+                        },
+                        "action": "close_all",
+                    },
+                    {
+                        "name": "reversion_done",
+                        "priority": 3,
                         "condition": {"feature": "order_imbalance", "op": ">", "threshold": -0.05},
                         "action": "close_all",
                     },
                     {
                         "name": "vol_spike_stop",
-                        "priority": 2,
+                        "priority": 4,
                         "condition": {"feature": "spread_bps", "op": ">", "threshold": 35.0},
                         "action": "close_all",
                     },
@@ -668,8 +822,28 @@ def _latency_adaptive_passive_entry() -> dict[str, Any]:
                 "name": "adaptive_passive_exits",
                 "rules": [
                     {
-                        "name": "imbalance_reverse",
+                        "name": "stop_loss",
                         "priority": 1,
+                        "condition": {
+                            "type": "comparison",
+                            "left": {"type": "position_attr", "name": "unrealized_pnl_bps"},
+                            "op": "<=", "threshold": -20.0,
+                        },
+                        "action": "close_all",
+                    },
+                    {
+                        "name": "time_exit",
+                        "priority": 2,
+                        "condition": {
+                            "type": "comparison",
+                            "left": {"type": "position_attr", "name": "holding_ticks"},
+                            "op": ">=", "threshold": 60.0,
+                        },
+                        "action": "close_all",
+                    },
+                    {
+                        "name": "imbalance_reverse",
+                        "priority": 3,
                         "condition": {"feature": "order_imbalance", "op": "<", "threshold": -0.08},
                         "action": "close_all",
                     },

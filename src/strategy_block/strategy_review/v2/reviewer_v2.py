@@ -42,9 +42,10 @@ from strategy_block.strategy_specs.v2.ast_nodes import (
     PersistExpr,
 )
 from strategy_block.strategy_review.review_common import (
+    KNOWN_FEATURES,
+    POSITION_ATTR_ONLY,
     ReviewIssue,
     ReviewResult,
-    KNOWN_FEATURES,
 )
 
 
@@ -76,6 +77,8 @@ class StrategyReviewerV2:
         self._check_degradation_conflict(spec, issues)
         self._check_exit_semantics_risk(spec, issues)
         self._check_position_attr_sanity(spec, issues)
+        self._check_position_attr_as_feature(spec, issues)
+        self._check_dead_exit_path(spec, issues)
         self._check_state_event_order_risk(spec, issues)
         self._check_execution_override_conflict(spec, issues)
         self._check_regime_exit_coverage(spec, issues)
@@ -286,7 +289,7 @@ class StrategyReviewerV2:
 
         if not has_close_all:
             issues.append(ReviewIssue(
-                severity="warning",
+                severity="error",
                 category="exit_completeness",
                 description="No exit rule with action='close_all' found",
                 suggestion=(
@@ -380,6 +383,14 @@ class StrategyReviewerV2:
 
     def _check_latency_structure_warning(self, spec: StrategySpecV2,
                                           issues: list[ReviewIssue]) -> None:
+        # NOTE: This check validates strategy-internal latency structure only.
+        # It does not know about engine-side observation lag (market_data_delay_ms).
+        # When market_data_delay_ms > 0, strategy-side lag/rolling expressions
+        # stack on top of the observation delay. For example, LagExpr(steps=5)
+        # with market_data_delay_ms=2000 at 1s resolution effectively looks back
+        # ~7 seconds. A future enhancement could accept market_data_delay_ms here
+        # and warn when short-horizon strategies are paired with large observation
+        # delays (TODO: cross-cutting review with BacktestConfig).
         all_nodes = self._collect_all_nodes(spec)
 
         for node in all_nodes:
@@ -481,11 +492,11 @@ class StrategyReviewerV2:
                     has_loss_reset = True
         if has_loss_increment and not has_loss_reset:
             issues.append(ReviewIssue(
-                severity="warning",
+                severity="error",
                 category="state_deadlock",
                 description=(
                     "loss_streak is incremented but never reset — "
-                    "entry degradation/guards may become permanent"
+                    "entry degradation/guards will become permanent over time"
                 ),
                 suggestion="Add an on_exit_profit or on_flatten reset for loss_streak",
             ))
@@ -542,7 +553,7 @@ class StrategyReviewerV2:
         metadata_flag = bool(spec.metadata.get("entry_gates_apply_to_exit"))
         has_entry_gates = bool(spec.preconditions) or bool(spec.regimes)
         has_dnt = bool(spec.execution_policy and spec.execution_policy.do_not_trade_when is not None)
-        has_unconditional_close = self._has_unconditional_close_all(spec)
+        has_robust_close = self._has_robust_close_all(spec)
 
         if metadata_flag:
             issues.append(ReviewIssue(
@@ -558,16 +569,18 @@ class StrategyReviewerV2:
                 ),
             ))
 
-        if (has_entry_gates or has_dnt) and not has_unconditional_close:
+        if (has_entry_gates or has_dnt) and not has_robust_close:
             issues.append(ReviewIssue(
-                severity="warning",
+                severity="error",
                 category="exit_semantics_risk",
                 description=(
                     "Entry gating conditions are present (preconditions/regimes/do_not_trade_when) "
-                    "and no unconditional close_all exit exists"
+                    "and no robust close_all fail-safe exists — "
+                    "positions may become trapped when gates block trading"
                 ),
                 suggestion=(
-                    "Ensure runtime enforces exit-first semantics and add a robust close_all fail-safe"
+                    "Add a robust close_all fail-safe (e.g. stop-loss on unrealized_pnl_bps "
+                    "or holding_ticks) that fires regardless of entry gates"
                 ),
             ))
 
@@ -584,6 +597,36 @@ class StrategyReviewerV2:
         for xp in spec.exit_policies:
             for rule in xp.rules:
                 if rule.action.type == "close_all" and self._is_always_true(rule.condition):
+                    return True
+        return False
+
+    def _has_robust_close_all(self, spec: StrategySpecV2) -> bool:
+        """Check if there is a robust close_all fail-safe.
+
+        Robust means at least one of:
+        - An unconditional close_all (ConstExpr always-true)
+        - A close_all gated on holding_ticks (time-based → eventually fires)
+        - A close_all gated on unrealized_pnl_bps (stop-loss → fires on drawdown)
+        """
+        for xp in spec.exit_policies:
+            for rule in xp.rules:
+                if rule.action.type != "close_all":
+                    continue
+                if self._is_always_true(rule.condition):
+                    return True
+                if self._condition_uses_position_attr(rule.condition, {"holding_ticks", "unrealized_pnl_bps"}):
+                    return True
+        return False
+
+    def _condition_uses_position_attr(self, node: ExprNode, attr_names: set[str]) -> bool:
+        """Check if a condition tree uses any of the given position_attr names."""
+        nodes: list[ExprNode] = []
+        self._walk_tree(node, nodes)
+        for n in nodes:
+            if isinstance(n, PositionAttrExpr) and n.name in attr_names:
+                return True
+            if isinstance(n, ComparisonExpr) and isinstance(n.left, PositionAttrExpr):
+                if n.left.name in attr_names:
                     return True
         return False
 
@@ -736,6 +779,134 @@ class StrategyReviewerV2:
                     suggestion="Use tighter stop/take-profit thresholds for tick-level strategies",
                 ))
 
+    # ── 21. Position attr used as feature (hard error) ────────────────
+
+    def _check_position_attr_as_feature(
+        self,
+        spec: StrategySpecV2,
+        issues: list[ReviewIssue],
+    ) -> None:
+        """Reject specs where position_attr-only names appear as plain features.
+
+        This catches the case where OpenAI (or a template) places e.g.
+        ``holding_ticks`` or ``unrealized_pnl_bps`` in a ComparisonExpr.feature
+        instead of ComparisonExpr.left=PositionAttrExpr(...).  At runtime
+        the feature lookup silently returns 0.0, making the condition dead.
+        """
+        seen: set[str] = set()
+        for node in self._collect_all_nodes(spec):
+            if not isinstance(node, ComparisonExpr):
+                continue
+            # ComparisonExpr uses .feature when .left is None (simple form)
+            if node.left is not None:
+                continue
+            if node.feature in POSITION_ATTR_ONLY and node.feature not in seen:
+                seen.add(node.feature)
+                issues.append(ReviewIssue(
+                    severity="error",
+                    category="position_attr_as_feature",
+                    description=(
+                        f"'{node.feature}' is a position attribute but is used as a "
+                        f"plain feature — this silently evaluates to 0.0 at runtime"
+                    ),
+                    suggestion=(
+                        f"Use position_attr='{node.feature}' in the condition "
+                        f"instead of feature='{node.feature}'"
+                    ),
+                ))
+            # Also check CrossExpr and RollingExpr that reference position attrs
+            if isinstance(node, ComparisonExpr) and node.left is not None:
+                from strategy_block.strategy_specs.v2.ast_nodes import (
+                    CrossExpr as _CE,
+                    RollingExpr as _RE,
+                )
+                if isinstance(node.left, (_CE, _RE)):
+                    feat = getattr(node.left, "feature", "")
+                    if feat in POSITION_ATTR_ONLY and feat not in seen:
+                        seen.add(feat)
+                        issues.append(ReviewIssue(
+                            severity="error",
+                            category="position_attr_as_feature",
+                            description=(
+                                f"'{feat}' is a position attribute but used "
+                                f"in cross/rolling — must use position_attr"
+                            ),
+                            suggestion=f"Rewrite to use position_attr='{feat}'",
+                        ))
+
+        # Also check CrossExpr and RollingExpr at top level
+        for node in self._collect_all_nodes(spec):
+            from strategy_block.strategy_specs.v2.ast_nodes import CrossExpr as _CrossE
+            if isinstance(node, _CrossE) and node.feature in POSITION_ATTR_ONLY:
+                if node.feature not in seen:
+                    seen.add(node.feature)
+                    issues.append(ReviewIssue(
+                        severity="error",
+                        category="position_attr_as_feature",
+                        description=(
+                            f"CrossExpr uses '{node.feature}' which is a position "
+                            f"attribute — cross conditions cannot use position attrs"
+                        ),
+                        suggestion="Use a feature-based cross or position_attr comparison",
+                    ))
+            if isinstance(node, RollingExpr) and node.feature in POSITION_ATTR_ONLY:
+                if node.feature not in seen:
+                    seen.add(node.feature)
+                    issues.append(ReviewIssue(
+                        severity="error",
+                        category="position_attr_as_feature",
+                        description=(
+                            f"RollingExpr uses '{node.feature}' which is a position "
+                            f"attribute — rolling aggregation cannot use position attrs"
+                        ),
+                        suggestion="Use a feature-based rolling or position_attr comparison",
+                    ))
+
+    # ── 22. Dead exit path (hard error) ─────────────────────────────────
+
+    def _check_dead_exit_path(
+        self,
+        spec: StrategySpecV2,
+        issues: list[ReviewIssue],
+    ) -> None:
+        """Reject specs where exit rules rely on position_attr names placed
+        in the feature field.  Such conditions silently evaluate to 0.0 at
+        runtime, making the exit rule effectively dead.
+
+        Specifically flags when a close_all exit rule's condition tree
+        contains a ComparisonExpr with feature ∈ POSITION_ATTR_ONLY and
+        no left expr (i.e. the legacy simple-comparison form).  A dead
+        stop-loss or time exit is a critical safety failure.
+        """
+        for xp_idx, xp in enumerate(spec.exit_policies):
+            for rule_idx, rule in enumerate(xp.rules):
+                dead_features = self._find_dead_features_in_exit(rule.condition)
+                if dead_features:
+                    issues.append(ReviewIssue(
+                        severity="error",
+                        category="dead_exit_path",
+                        description=(
+                            f"exit_policies[{xp_idx}].rules[{rule_idx}] '{rule.name}' "
+                            f"uses {', '.join(sorted(dead_features))} as feature — "
+                            f"evaluates to 0.0 at runtime, making this exit dead"
+                        ),
+                        suggestion=(
+                            "Use position_attr instead of feature for "
+                            + ", ".join(sorted(dead_features))
+                        ),
+                    ))
+
+    def _find_dead_features_in_exit(self, node: ExprNode) -> set[str]:
+        """Collect position_attr names misused as feature in an exit condition tree."""
+        result: set[str] = set()
+        nodes: list[ExprNode] = []
+        self._walk_tree(node, nodes)
+        for n in nodes:
+            if isinstance(n, ComparisonExpr) and n.left is None:
+                if n.feature in POSITION_ATTR_ONLY:
+                    result.add(n.feature)
+        return result
+
     def _check_state_event_order_risk(
         self,
         spec: StrategySpecV2,
@@ -867,9 +1038,12 @@ class StrategyReviewerV2:
 
         if has_regime_entry and not global_has_close:
             issues.append(ReviewIssue(
-                severity="warning",
+                severity="error",
                 category="regime_exit_coverage",
-                description="Regime entries exist but global exit policies have no close_all",
+                description=(
+                    "Regime entries exist but global exit policies have no close_all — "
+                    "positions opened via regime may have no exit path"
+                ),
                 suggestion="Add at least one global close_all fallback",
             ))
 

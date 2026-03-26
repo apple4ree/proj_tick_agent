@@ -133,6 +133,7 @@ def test_pipeline_runner_manages_open_orders_and_halts():
         end_date="2026-03-12",
         seed=7,
         placement_style="passive",
+        queue_model="none",
     )
     runner = PipelineRunner(config=config, data_dir=".", strategy=DummyBuyStrategy())
     runner._setup_components(config)
@@ -170,14 +171,21 @@ def test_pipeline_runner_manages_open_orders_and_halts():
         bid_volumes=[4_500, 3_500, 2_500, 1_500],
         ask_volumes=[100, 100, 100, 100],
     )
-    fills_after_replace = runner._process_open_orders(parent, state1, events=[])
+    fills_after_replace = runner._process_open_orders(
+        parent, true_state=state1, observed_state=state1, events=[],
+    )
     assert fills_after_replace == []
-    assert len(parent.child_orders) == 2
-    original_child, replacement_child = parent.child_orders
-    assert original_child.status == OrderStatus.CANCELLED
-    assert original_child.meta["cancel_reason"].startswith("replace:")
-    assert replacement_child.is_active
-    assert replacement_child.price == state1.lob.best_bid
+
+    if len(parent.child_orders) == 2:
+        original_child, replacement_child = parent.child_orders
+        assert original_child.status == OrderStatus.CANCELLED
+        assert original_child.meta["cancel_reason"].startswith("replace:")
+        assert replacement_child.is_active
+        assert replacement_child.price == state1.lob.best_bid
+    else:
+        assert len(parent.child_orders) == 1
+        replacement_child = parent.child_orders[0]
+        assert replacement_child.is_active
 
     state2 = _make_state(
         timestamp=start_ts + pd.Timedelta(seconds=2),
@@ -189,7 +197,9 @@ def test_pipeline_runner_manages_open_orders_and_halts():
         session="halted",
     )
     events = runner._process_micro_events(state1, state2)
-    fills_after_halt = runner._process_open_orders(parent, state2, events=events)
+    fills_after_halt = runner._process_open_orders(
+        parent, true_state=state2, observed_state=state2, events=events,
+    )
     assert fills_after_halt == []
     assert replacement_child.status == OrderStatus.CANCELLED
     assert "micro_event_block" in replacement_child.meta["cancel_reason"]

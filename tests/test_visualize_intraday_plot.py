@@ -14,7 +14,7 @@ if str(SRC_ROOT) not in sys.path:
 
 
 def _load_visualize_module():
-    script_path = PROJECT_ROOT / "scripts" / "visualize.py"
+    script_path = PROJECT_ROOT / "scripts" / "internal" / "adhoc" / "visualize.py"
     spec = importlib.util.spec_from_file_location("visualize_script", script_path)
     module = importlib.util.module_from_spec(spec)
     assert spec is not None and spec.loader is not None

@@ -1,0 +1,151 @@
+{
+  "name": "openai_spread_fade_plan",
+  "version": "2.0",
+  "description": "Fade extreme imbalance when spread is wide.",
+  "spec_format": "v2",
+  "preconditions": [
+    {
+      "name": "spread_ok",
+      "condition": {
+        "type": "comparison",
+        "op": "<",
+        "threshold": 30.0,
+        "feature": "spread_bps"
+      }
+    }
+  ],
+  "entry_policies": [
+    {
+      "name": "long_entry",
+      "side": "long",
+      "trigger": {
+        "type": "all",
+        "children": [
+          {
+            "type": "comparison",
+            "op": "<",
+            "threshold": -0.4,
+            "feature": "order_imbalance"
+          },
+          {
+            "type": "comparison",
+            "op": ">",
+            "threshold": 0.1,
+            "feature": "depth_imbalance"
+          }
+        ]
+      },
+      "strength": {
+        "type": "const",
+        "value": 0.6
+      },
+      "constraints": {
+        "cooldown_ticks": 50,
+        "no_reentry_until_flat": true
+      }
+    },
+    {
+      "name": "short_entry",
+      "side": "short",
+      "trigger": {
+        "type": "all",
+        "children": [
+          {
+            "type": "comparison",
+            "op": ">",
+            "threshold": 0.4,
+            "feature": "order_imbalance"
+          },
+          {
+            "type": "comparison",
+            "op": "<",
+            "threshold": -0.1,
+            "feature": "depth_imbalance"
+          }
+        ]
+      },
+      "strength": {
+        "type": "const",
+        "value": 0.6
+      },
+      "constraints": {
+        "cooldown_ticks": 50,
+        "no_reentry_until_flat": true
+      }
+    }
+  ],
+  "exit_policies": [
+    {
+      "name": "risk_exits",
+      "rules": [
+        {
+          "name": "stop_loss",
+          "priority": 1,
+          "condition": {
+            "type": "comparison",
+            "op": "<=",
+            "threshold": -25.0,
+            "left": {
+              "type": "position_attr",
+              "name": "unrealized_pnl_bps"
+            }
+          },
+          "action": {
+            "type": "close_all"
+          }
+        },
+        {
+          "name": "time_exit",
+          "priority": 2,
+          "condition": {
+            "type": "comparison",
+            "op": ">=",
+            "threshold": 30.0,
+            "left": {
+              "type": "position_attr",
+              "name": "holding_ticks"
+            }
+          },
+          "action": {
+            "type": "close_all"
+          }
+        },
+        {
+          "name": "spread_exit",
+          "priority": 3,
+          "condition": {
+            "type": "comparison",
+            "op": ">",
+            "threshold": 25.0,
+            "feature": "spread_bps"
+          },
+          "action": {
+            "type": "close_all"
+          }
+        }
+      ]
+    }
+  ],
+  "risk_policy": {
+    "max_position": 400,
+    "inventory_cap": 800,
+    "position_sizing": {
+      "mode": "fixed",
+      "base_size": 100,
+      "max_size": 400
+    }
+  },
+  "regimes": [],
+  "metadata": {
+    "pipeline": "v2_openai_plan_lowering",
+    "plan_name": "openai_spread_fade_plan",
+    "plan_style": "mean_reversion",
+    "research_goal": "short-horizon scalping alpha with passive entry, fast time exit, and strict spread filter",
+    "strategy_style": "mean_reversion",
+    "latency_ms": 1.0,
+    "spec_canonical": "v2",
+    "generation_source": "openai_v2_plan",
+    "plan_schema_version": "plan_v1",
+    "generated_at": "2026-03-24T09:13:11.577410+00:00"
+  }
+}

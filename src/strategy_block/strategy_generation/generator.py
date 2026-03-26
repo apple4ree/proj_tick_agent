@@ -1,4 +1,15 @@
-"""StrategySpec v2 generator (canonical, v2-only)."""
+"""StrategySpec v2 generator (canonical, v2-only).
+
+Supports two generation backends:
+- template: deterministic template selection + lowering (default)
+- openai:   OpenAI structured plan generation + lowering
+
+TODO (observation lag): When market_data_delay_ms is added to the backtest
+config, consider passing it to the planner prompt context alongside
+latency_ms. This would let the planner generate more conservative execution
+assumptions when observation lag is high (e.g., wider stop-loss, longer
+time exits). Not required for the initial observation-lag implementation.
+"""
 from __future__ import annotations
 
 import logging
@@ -8,6 +19,7 @@ from typing import Any
 from strategy_block.strategy_specs.v2.schema_v2 import StrategySpecV2
 from strategy_block.strategy_review.v2.reviewer_v2 import StrategyReviewerV2
 
+from .openai_client import OpenAIStrategyGenClient
 from .v2.lowering import lower_to_spec_v2
 from .v2.templates_v2 import V2_TEMPLATES, get_v2_template
 
@@ -23,7 +35,7 @@ class StaticReviewError(ValueError):
 
 
 class StrategyGenerator:
-    """StrategySpec v2 generator with template-default behavior."""
+    """StrategySpec v2 generator with template and OpenAI backends."""
 
     def __init__(
         self,
@@ -38,17 +50,33 @@ class StrategyGenerator:
         allow_heuristic_fallback: bool = True,
         fail_on_fallback: bool = False,
     ) -> None:
-        del model, replay_path, allow_heuristic_fallback
         if spec_format != "v2":
             raise ValueError("Only spec_format='v2' is supported")
 
         self.latency_ms = latency_ms
         self.backend = backend
         self.mode = mode
+        self.model = model
+        self.replay_path = replay_path
         self.spec_format = "v2"
         self.allow_template_fallback = bool(allow_template_fallback)
         self.fail_on_fallback = bool(fail_on_fallback)
         self._reviewer_v2 = StrategyReviewerV2()
+
+        # Lazily initialized for openai backend
+        self._openai_client: OpenAIStrategyGenClient | None = None
+
+    def _get_openai_client(self) -> OpenAIStrategyGenClient:
+        """Get or create the OpenAI client."""
+        if self._openai_client is None:
+            from pathlib import Path
+            rp = Path(self.replay_path) if self.replay_path else None
+            self._openai_client = OpenAIStrategyGenClient(
+                mode=self.mode,
+                model=self.model,
+                replay_path=rp,
+            )
+        return self._openai_client
 
     _V2_GOAL_KEYWORDS: dict[str, list[str]] = {
         "imbalance": ["imbalance_persist_momentum", "adaptive_execution_imbalance"],
@@ -73,6 +101,7 @@ class StrategyGenerator:
         effective_backend: str,
         requested_mode: str,
         effective_mode: str,
+        generation_class: str = "template_v2",
     ) -> dict[str, Any]:
         provenance = dict(trace.get("provenance") or {})
         provenance.setdefault("requested_backend", requested_backend)
@@ -80,7 +109,7 @@ class StrategyGenerator:
         provenance.setdefault("requested_mode", requested_mode)
         provenance.setdefault("effective_mode", effective_mode)
         provenance.setdefault("spec_format", "v2")
-        provenance.setdefault("generation_class", "template_v2")
+        provenance.setdefault("generation_class", generation_class)
         trace["provenance"] = provenance
 
         fallback_obj = dict(trace.get("fallback") or {})
@@ -132,53 +161,7 @@ class StrategyGenerator:
         idea_index: int = 0,
     ) -> tuple[StrategySpecV2, dict[str, Any]]:
         if self.backend == "openai":
-            if not self.allow_template_fallback:
-                trace = {
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "generation_outcome": "failed_fallback_disabled",
-                    "static_review_passed": False,
-                    "fallback_used": True,
-                    "fallback": {
-                        "used": True,
-                        "count": 1,
-                        "events": [{
-                            "stage": "generator",
-                            "type": "fallback_blocked",
-                            "reason": "openai backend is not available for v2 generation",
-                            "severity": "high",
-                        }],
-                    },
-                }
-                trace = self._finalize_trace(
-                    trace=trace,
-                    requested_backend="openai",
-                    effective_backend="template_v2",
-                    requested_mode=self.mode,
-                    effective_mode=self.mode,
-                )
-                raise StaticReviewError(
-                    "openai backend is not available for v2 generation and fallback is disabled",
-                    trace=trace,
-                )
-
-            logger.warning("openai backend requested; using canonical v2 template generation")
-            spec, trace = self._generate_template_v2(
-                research_goal=research_goal,
-                n_ideas=n_ideas,
-                idea_index=idea_index,
-            )
-            trace["fallback_used"] = True
-            trace["fallback_reason"] = "openai backend redirected to v2 template"
-            trace["generation_outcome"] = "fallback_success"
-            trace = self._finalize_trace(
-                trace=trace,
-                requested_backend="openai",
-                effective_backend="template_v2",
-                requested_mode=self.mode,
-                effective_mode=self.mode,
-            )
-            self._enforce_fail_on_fallback(trace, context="v2_openai_redirect")
-            return spec, trace
+            return self._generate_openai_v2(research_goal=research_goal)
 
         spec, trace = self._generate_template_v2(
             research_goal=research_goal,
@@ -194,6 +177,110 @@ class StrategyGenerator:
         )
         self._enforce_fail_on_fallback(trace, context="v2_template")
         return spec, trace
+
+    def _generate_openai_v2(
+        self,
+        *,
+        research_goal: str,
+    ) -> tuple[StrategySpecV2, dict[str, Any]]:
+        """Generate via OpenAI structured plan + lowering."""
+        from .v2.openai_generation import generate_spec_v2_with_openai
+        from .v2.utils.response_parser import PlanParseError
+
+        try:
+            client = self._get_openai_client()
+            spec, trace = generate_spec_v2_with_openai(
+                client=client,
+                research_goal=research_goal,
+                latency_ms=self.latency_ms,
+                reviewer=self._reviewer_v2,
+            )
+
+            # Check review result
+            if trace.get("static_review_passed") is False:
+                error_issues = trace.get("static_review", {}).get("issues", [])
+                error_descriptions = "; ".join(
+                    i["description"] for i in error_issues if i.get("severity") == "error"
+                )
+                trace["generation_outcome"] = "failed"
+                trace = self._finalize_trace(
+                    trace=trace,
+                    requested_backend="openai",
+                    effective_backend="openai_v2",
+                    requested_mode=self.mode,
+                    effective_mode=self.mode,
+                    generation_class="openai_v2_plan",
+                )
+                raise StaticReviewError(
+                    f"OpenAI v2 spec '{spec.name}' failed static review: {error_descriptions}",
+                    trace=trace,
+                )
+
+            trace["generation_outcome"] = "success"
+            trace = self._finalize_trace(
+                trace=trace,
+                requested_backend="openai",
+                effective_backend="openai_v2",
+                requested_mode=self.mode,
+                effective_mode=self.mode,
+                generation_class="openai_v2_plan",
+            )
+            return spec, trace
+
+        except (PlanParseError, StaticReviewError) as e:
+            # If it's already a StaticReviewError with trace, re-raise as-is
+            if isinstance(e, StaticReviewError):
+                raise
+
+            # OpenAI failed to produce a parseable plan — try template fallback
+            logger.warning("OpenAI v2 generation failed: %s", e)
+
+            if not self.allow_template_fallback:
+                trace = {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "generation_outcome": "failed_openai_no_fallback",
+                    "static_review_passed": False,
+                    "fallback_used": False,
+                    "openai_error": str(e),
+                }
+                trace = self._finalize_trace(
+                    trace=trace,
+                    requested_backend="openai",
+                    effective_backend="openai_v2",
+                    requested_mode=self.mode,
+                    effective_mode=self.mode,
+                    generation_class="openai_v2_plan",
+                )
+                raise StaticReviewError(
+                    f"OpenAI v2 generation failed and template fallback is disabled: {e}",
+                    trace=trace,
+                ) from e
+
+            # Fallback to template
+            logger.warning("Falling back to template_v2 generation")
+            spec, trace = self._generate_template_v2(
+                research_goal=research_goal,
+                n_ideas=3,
+                idea_index=0,
+            )
+            trace["fallback_used"] = True
+            trace.setdefault("fallback", {})["events"] = trace.get("fallback", {}).get("events", []) + [{
+                "stage": "generator",
+                "type": "openai_to_template_fallback",
+                "reason": str(e),
+                "severity": "medium",
+            }]
+            trace["generation_outcome"] = "fallback_success"
+            trace = self._finalize_trace(
+                trace=trace,
+                requested_backend="openai",
+                effective_backend="template_v2",
+                requested_mode=self.mode,
+                effective_mode=self.mode,
+                generation_class="template_v2",
+            )
+            self._enforce_fail_on_fallback(trace, context="openai_v2_fallback")
+            return spec, trace
 
     def generate_batch(
         self,

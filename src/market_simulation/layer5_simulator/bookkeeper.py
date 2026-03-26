@@ -161,6 +161,8 @@ class Bookkeeper:
         )
         # FIFO 원가 큐: symbol → (price, qty) 튜플 deque
         self._cost_queues: dict[str, deque[tuple[float, int]]] = defaultdict(deque)
+        # Short FIFO 원가 큐: symbol → (sell_price, qty) 튜플 deque
+        self._short_cost_queues: dict[str, deque[tuple[float, int]]] = defaultdict(deque)
 
     # ------------------------------------------------------------------
     # 체결 기록
@@ -170,8 +172,11 @@ class Bookkeeper:
         """
         Update positions, cash, and P&L based on `fill`.
 
-        For BUY:  cash decreases by total_cost; position increases.
-        For SELL: cash increases by total_cost; position decreases; realise P&L.
+        Handles four accounting paths:
+        - BUY when flat/long:  open/add long — push to long FIFO
+        - BUY when short:      cover short — pop short FIFO, realise P&L
+        - SELL when flat/short: open/add short — push to short FIFO
+        - SELL when long:       close long — pop long FIFO, realise P&L
         """
         self.fills.append(fill)
         self.state.timestamp = fill.timestamp
@@ -182,27 +187,45 @@ class Bookkeeper:
         self.state.total_slippage_cost += slippage_cost_krw
 
         symbol = fill.symbol
+        current_pos = self.state.positions.get(symbol, 0)
 
         if fill.side == OrderSide.BUY:
-            # 현금을 차감한다
             self.state.cash -= fill.total_cost
-            # 포지션에 더한다
-            self.state.positions[symbol] = (
-                self.state.positions.get(symbol, 0) + fill.filled_qty
-            )
-            # FIFO 큐에 넣는다
-            self._cost_queues[symbol].append((fill.fill_price, fill.filled_qty))
+            self.state.positions[symbol] = current_pos + fill.filled_qty
+
+            if current_pos < 0:
+                # Covering short position
+                cover_qty = min(fill.filled_qty, abs(current_pos))
+                realised = self._realise_pnl_fifo_short(
+                    symbol, cover_qty, fill.fill_price,
+                )
+                self.state.realized_pnl += realised
+                # If we flipped to long, remaining goes to long FIFO
+                remaining = fill.filled_qty - cover_qty
+                if remaining > 0:
+                    self._cost_queues[symbol].append((fill.fill_price, remaining))
+            else:
+                # Opening/adding to long
+                self._cost_queues[symbol].append((fill.fill_price, fill.filled_qty))
 
         else:  # SELL
-            # 현금을 수취한다
             self.state.cash += fill.total_cost
-            # 포지션을 줄인다
-            self.state.positions[symbol] = (
-                self.state.positions.get(symbol, 0) - fill.filled_qty
-            )
-            # FIFO 기준으로 손익을 실현한다
-            realised = self._realise_pnl_fifo(symbol, fill.filled_qty, fill.fill_price)
-            self.state.realized_pnl += realised
+            self.state.positions[symbol] = current_pos - fill.filled_qty
+
+            if current_pos > 0:
+                # Closing long position
+                close_qty = min(fill.filled_qty, current_pos)
+                realised = self._realise_pnl_fifo(
+                    symbol, close_qty, fill.fill_price,
+                )
+                self.state.realized_pnl += realised
+                # If we flipped to short, remaining goes to short FIFO
+                remaining = fill.filled_qty - close_qty
+                if remaining > 0:
+                    self._short_cost_queues[symbol].append((fill.fill_price, remaining))
+            else:
+                # Opening/adding to short
+                self._short_cost_queues[symbol].append((fill.fill_price, fill.filled_qty))
 
     # ------------------------------------------------------------------
     # 손익 도우미
@@ -212,25 +235,59 @@ class Bookkeeper:
         """
         Compute cumulative realised P&L for `symbol` using FIFO matching.
         This re-computes from the fill history rather than using cached state.
+        Handles both long and short positions.
         """
-        cost_queue: deque[tuple[float, int]] = deque()
+        long_queue: deque[tuple[float, int]] = deque()
+        short_queue: deque[tuple[float, int]] = deque()
         realised = 0.0
+        pos = 0
+
         for fill in self.fills:
             if fill.symbol != symbol:
                 continue
+
             if fill.side == OrderSide.BUY:
-                cost_queue.append((fill.fill_price, fill.filled_qty))
-            else:
-                remaining_sell = fill.filled_qty
-                while remaining_sell > 0 and cost_queue:
-                    cost_price, cost_qty = cost_queue[0]
-                    matched = min(remaining_sell, cost_qty)
-                    realised += matched * (fill.fill_price - cost_price)
-                    remaining_sell -= matched
-                    if matched == cost_qty:
-                        cost_queue.popleft()
-                    else:
-                        cost_queue[0] = (cost_price, cost_qty - matched)
+                if pos < 0:
+                    # Covering short
+                    cover_qty = min(fill.filled_qty, abs(pos))
+                    rem = cover_qty
+                    while rem > 0 and short_queue:
+                        sp, sq = short_queue[0]
+                        m = min(rem, sq)
+                        realised += m * (sp - fill.fill_price)
+                        rem -= m
+                        if m == sq:
+                            short_queue.popleft()
+                        else:
+                            short_queue[0] = (sp, sq - m)
+                    remaining = fill.filled_qty - cover_qty
+                    if remaining > 0:
+                        long_queue.append((fill.fill_price, remaining))
+                else:
+                    long_queue.append((fill.fill_price, fill.filled_qty))
+                pos += fill.filled_qty
+
+            else:  # SELL
+                if pos > 0:
+                    # Closing long
+                    close_qty = min(fill.filled_qty, pos)
+                    rem = close_qty
+                    while rem > 0 and long_queue:
+                        cp, cq = long_queue[0]
+                        m = min(rem, cq)
+                        realised += m * (fill.fill_price - cp)
+                        rem -= m
+                        if m == cq:
+                            long_queue.popleft()
+                        else:
+                            long_queue[0] = (cp, cq - m)
+                    remaining = fill.filled_qty - close_qty
+                    if remaining > 0:
+                        short_queue.append((fill.fill_price, remaining))
+                else:
+                    short_queue.append((fill.fill_price, fill.filled_qty))
+                pos -= fill.filled_qty
+
         return realised
 
     def mark_to_market(self, prices: dict[str, float]) -> float:
@@ -264,9 +321,18 @@ class Bookkeeper:
         """
         Return the FIFO average cost basis per share for `symbol`.
 
+        For long positions, uses the long FIFO queue.
+        For short positions, uses the short FIFO queue (avg sell price).
         If no open position exists, returns 0.0.
         """
-        queue = self._cost_queues.get(symbol)
+        pos = self.state.positions.get(symbol, 0)
+        if pos > 0:
+            queue = self._cost_queues.get(symbol)
+        elif pos < 0:
+            queue = self._short_cost_queues.get(symbol)
+        else:
+            return 0.0
+
         if not queue:
             return 0.0
         total_cost = sum(price * qty for price, qty in queue)
@@ -294,6 +360,7 @@ class Bookkeeper:
             self._initial_cash = initial_cash
         self.fills.clear()
         self._cost_queues.clear()
+        self._short_cost_queues.clear()
         self.state = AccountState(
             timestamp=pd.Timestamp.now(),
             cash=cash,
@@ -346,7 +413,7 @@ class Bookkeeper:
         sell_price: float,
     ) -> float:
         """
-        Match `sell_qty` against the FIFO cost queue and return realised P&L.
+        Match `sell_qty` against the long FIFO cost queue and return realised P&L.
         Modifies self._cost_queues[symbol] in place.
         """
         queue = self._cost_queues[symbol]
@@ -362,5 +429,32 @@ class Bookkeeper:
                 queue.popleft()
             else:
                 queue[0] = (cost_price, cost_qty - matched)
+
+        return realised
+
+    def _realise_pnl_fifo_short(
+        self,
+        symbol: str,
+        cover_qty: int,
+        buy_price: float,
+    ) -> float:
+        """
+        Match `cover_qty` against the short FIFO queue and return realised P&L.
+        Short profit = sell_price - buy_price for each matched lot.
+        Modifies self._short_cost_queues[symbol] in place.
+        """
+        queue = self._short_cost_queues[symbol]
+        realised = 0.0
+        remaining = cover_qty
+
+        while remaining > 0 and queue:
+            sell_price, sell_qty = queue[0]
+            matched = min(remaining, sell_qty)
+            realised += matched * (sell_price - buy_price)
+            remaining -= matched
+            if matched == sell_qty:
+                queue.popleft()
+            else:
+                queue[0] = (sell_price, sell_qty - matched)
 
         return realised

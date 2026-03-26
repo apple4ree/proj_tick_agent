@@ -40,8 +40,14 @@ def _make_state() -> MarketState:
     )
 
 
-def test_matching_engine_prob_queue_allows_partial_touch_fill():
-    state = _make_state()
+def test_matching_engine_resting_fill_ignores_queue_model():
+    """MatchingEngine no longer applies queue-position filtering.
+
+    Queue semantics are the sole responsibility of FillSimulator.
+    Regardless of queue_model, MatchingEngine fills up to observed
+    trade volume at the resting price (capped by child qty).
+    """
+    state = _make_state()  # trades: 2x20 at 100.0 → touch_qty=40
     book = OrderBookSimulator()
     book.update(state.lob)
     parent = ParentOrder.create(symbol="TEST", side=OrderSide.BUY, qty=50, arrival_mid=state.mid)
@@ -65,11 +71,13 @@ def test_matching_engine_prob_queue_allows_partial_touch_fill():
         queue_position_assumption=0.5,
     )
 
-    risk_fill_qty, _ = risk_adverse.match(child, book, state)
+    risk_fill_qty, risk_fill_price = risk_adverse.match(child, book, state)
     prob_fill_qty, prob_fill_price = prob_queue.match(child, book, state)
 
-    assert risk_fill_qty == 0
-    assert prob_fill_qty == 30
+    # Both engines yield the same result — queue filtering is not applied here.
+    assert risk_fill_qty == 40
+    assert risk_fill_price == 100.0
+    assert prob_fill_qty == 40
     assert prob_fill_price == 100.0
 
 

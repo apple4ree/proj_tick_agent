@@ -13,6 +13,22 @@ Cancellation triggers:
 
 Replacement triggers:
   - Order is stale but not yet adverse-selected → repeg to current best
+
+Design notes (2026-03 retune):
+  - cancel_after_ticks is converted to seconds via tick_interval_ms, which must
+    be set to the canonical tick interval (= resample step duration of the run).
+    E.g. at 1s resample: ``cancel_after_ticks=10`` → 10.0 s timeout.
+    At 500ms resample: ``cancel_after_ticks=10`` → 5.0 s timeout.
+    tick_interval_ms is NOT latency_ms — latency controls order-to-ack delay,
+    while tick_interval_ms controls the wall-clock meaning of tick-based params.
+  - stale_levels default raised to 3 to reduce excessive repricing on Korean equities.
+  - adverse_selection_threshold_bps raised to 10 to tolerate normal tick noise.
+  - When max_reprices is reached the order is kept alive (not cancelled) — the
+    position has already been repriced to a competitive price and forcing a cancel
+    just creates a new child order cycle.
+  - For passive_join/passive_only, timeout is treated as a management checkpoint,
+    not a forced cancel if the order is still near-touch. This preserves queue
+    priority and reduces cancel/reprice churn.
 """
 from __future__ import annotations
 
@@ -41,17 +57,32 @@ class CancelReplaceLogic:
     adverse_selection_threshold_bps : float
         If the mid price has moved by this many bps against the order's
         direction since submission, the order is cancelled (adverse fill risk).
+    tick_interval_ms : float
+        Milliseconds per canonical tick (= resample step duration).
+        Used to convert ``cancel_after_ticks`` to seconds.
+        PipelineRunner sets this to the run's resample interval:
+        1000.0 for 1s, 500.0 for 500ms.  This is NOT latency_ms.
+    max_reprices_action : str
+        What to do when ``max_reprices`` is reached:
+        ``"keep"`` — leave the order alive at its last repriced price (default).
+        ``"cancel"`` — cancel the order (legacy behaviour).
     """
 
     def __init__(
         self,
         timeout_seconds: float = 30.0,
-        stale_levels: int = 2,
-        adverse_selection_threshold_bps: float = 5.0,
+        stale_levels: int = 3,
+        adverse_selection_threshold_bps: float = 10.0,
+        tick_interval_ms: float = 1000.0,
+        max_reprices_action: str = "keep",
     ) -> None:
         self.timeout_seconds = timeout_seconds
         self.stale_levels = stale_levels
         self.adverse_selection_threshold_bps = adverse_selection_threshold_bps
+        self.tick_interval_ms = tick_interval_ms
+        if max_reprices_action not in ("keep", "cancel"):
+            raise ValueError(f"max_reprices_action must be 'keep' or 'cancel', got {max_reprices_action!r}")
+        self.max_reprices_action = max_reprices_action
 
     # ------------------------------------------------------------------
     # 공개 API
@@ -63,6 +94,7 @@ class CancelReplaceLogic:
         state: MarketState,
         time_since_submit: float,
         cancel_after_ticks: int | None = None,
+        placement_mode: str | None = None,
     ) -> tuple[bool, str]:
         """
         Determine whether `child` should be cancelled.
@@ -74,9 +106,17 @@ class CancelReplaceLogic:
         # 1. 타임아웃 (optional signal override)
         timeout_seconds = self.timeout_seconds
         if cancel_after_ticks is not None and cancel_after_ticks > 0:
-            timeout_seconds = float(cancel_after_ticks)
+            # Convert ticks → seconds using tick_interval_ms.
+            # E.g. cancel_after_ticks=20 at 100 ms/tick → 2.0 s timeout.
+            timeout_seconds = cancel_after_ticks * (self.tick_interval_ms / 1000.0)
 
+        mode = (placement_mode or "").strip().lower()
+        levels_away = self._levels_away_from_best(child, state)
         if time_since_submit >= timeout_seconds:
+            if mode in {"passive_join", "passive_only"} and levels_away <= self.stale_levels:
+                # In passive-join mode, keep resting at near-touch quotes to avoid
+                # losing queue priority via repeated cancel/re-submit cycles.
+                return False, ""
             return True, f"timeout ({time_since_submit:.1f}s >= {timeout_seconds}s)"
 
         # 2. 역선택
@@ -85,7 +125,6 @@ class CancelReplaceLogic:
 
         # 3. 가격이 너무 멀어짐(가격 노후화, 다만 교체가 우선)
         #    - 재호가가 불가능할 때 취소를 대안으로 사용한다)
-        levels_away = self._levels_away_from_best(child, state)
         if levels_away > self.stale_levels * 2:
             # 매우 오래된 가격이면 바로 취소한다
             return True, f"price_very_stale ({levels_away} levels away)"
@@ -156,6 +195,7 @@ class CancelReplaceLogic:
         current_time: pd.Timestamp,
         cancel_after_ticks: int | None = None,
         max_reprices: int | None = None,
+        placement_mode: str | None = None,
     ) -> list[dict]:
         """
         Evaluate every open order and return a list of action dictionaries.
@@ -177,7 +217,11 @@ class CancelReplaceLogic:
             )
 
             cancel, reason = self.should_cancel(
-                child, state, time_since, cancel_after_ticks=cancel_after_ticks
+                child,
+                state,
+                time_since,
+                cancel_after_ticks=cancel_after_ticks,
+                placement_mode=placement_mode,
             )
             if cancel:
                 actions.append(
@@ -189,9 +233,15 @@ class CancelReplaceLogic:
             if replace:
                 reprice_count = int(child.meta.get("reprice_count", 0))
                 if max_reprices is not None and max_reprices >= 0 and reprice_count >= max_reprices:
-                    actions.append(
-                        {"action": "cancel", "order": child, "new_price": None, "reason": "max_reprices_reached"}
-                    )
+                    if self.max_reprices_action == "cancel":
+                        actions.append(
+                            {"action": "cancel", "order": child, "new_price": None, "reason": "max_reprices_reached"}
+                        )
+                    else:
+                        # keep: order stays alive at its last repriced price
+                        actions.append(
+                            {"action": "keep", "order": child, "new_price": None, "reason": "max_reprices_reached_keep"}
+                        )
                 else:
                     actions.append(
                         {"action": "replace", "order": child, "new_price": new_p, "reason": "stale_price"}
@@ -223,7 +273,6 @@ class CancelReplaceLogic:
             levels = lob.bid_levels
             if not levels:
                 return 0
-            best = levels[0].price
             # child.price보다 엄격히 더 좋은 레벨 수를 센다
             return sum(1 for lvl in levels if lvl.price > child.price)
         else:

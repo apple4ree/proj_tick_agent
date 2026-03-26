@@ -155,6 +155,15 @@ class ComponentFactory:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def normalize_queue_model(queue_model: str | None) -> str:
+        """Normalize queue model name for matching/fill components."""
+        if not isinstance(queue_model, str):
+            return "prob_queue"
+        q = queue_model.strip().lower()
+        allowed = {"none", "price_time", "risk_adverse", "prob_queue", "pro_rata", "random"}
+        return q if q in allowed else "prob_queue"
+
+    @staticmethod
     def build_matching_engine(cfg: "ExchangeConfig", seed: int | None = None) -> "MatchingEngine":
         """
         Build a matching engine from ExchangeConfig.
@@ -181,13 +190,15 @@ class ComponentFactory:
 
         # Parse queue model
         queue_model_map = {
+            "none": QueueModel.NONE,
             "price_time": QueueModel.PRICE_TIME,
             "risk_adverse": QueueModel.RISK_ADVERSE,
             "prob_queue": QueueModel.PROB_QUEUE,
             "pro_rata": QueueModel.PRO_RATA,
             "random": QueueModel.RANDOM,
         }
-        queue_model = queue_model_map.get(cfg.queue_model.lower(), QueueModel.PROB_QUEUE)
+        queue_model_name = ComponentFactory.normalize_queue_model(cfg.queue_model)
+        queue_model = queue_model_map.get(queue_model_name, QueueModel.PROB_QUEUE)
 
         return MatchingEngine(
             exchange_model=exchange_model,

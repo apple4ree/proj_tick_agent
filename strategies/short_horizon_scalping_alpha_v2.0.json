@@ -1,0 +1,144 @@
+{
+  "name": "short_horizon_scalping_alpha",
+  "version": "2.0",
+  "description": "A scalping strategy targeting short-horizon alpha with passive entry and fast exits, utilizing a strict spread filter.",
+  "spec_format": "v2",
+  "preconditions": [
+    {
+      "name": "strict_spread_filter",
+      "condition": {
+        "type": "comparison",
+        "op": "<",
+        "threshold": 10.0,
+        "feature": "spread_bps"
+      }
+    }
+  ],
+  "entry_policies": [
+    {
+      "name": "long_entry_passive",
+      "side": "long",
+      "trigger": {
+        "type": "comparison",
+        "op": ">",
+        "threshold": 0.3,
+        "feature": "depth_imbalance_l1"
+      },
+      "strength": {
+        "type": "const",
+        "value": 0.5
+      },
+      "constraints": {
+        "cooldown_ticks": 50,
+        "no_reentry_until_flat": true
+      }
+    },
+    {
+      "name": "short_entry_passive",
+      "side": "short",
+      "trigger": {
+        "type": "comparison",
+        "op": "<",
+        "threshold": -0.3,
+        "feature": "depth_imbalance_l1"
+      },
+      "strength": {
+        "type": "const",
+        "value": 0.5
+      },
+      "constraints": {
+        "cooldown_ticks": 50,
+        "no_reentry_until_flat": true
+      }
+    }
+  ],
+  "exit_policies": [
+    {
+      "name": "fast_exit_policy",
+      "rules": [
+        {
+          "name": "time_based_exit",
+          "priority": 1,
+          "condition": {
+            "type": "comparison",
+            "op": ">",
+            "threshold": 100.0,
+            "feature": "holding_ticks"
+          },
+          "action": {
+            "type": "close_all"
+          }
+        },
+        {
+          "name": "stop_loss_exit",
+          "priority": 2,
+          "condition": {
+            "type": "comparison",
+            "op": "<",
+            "threshold": -5.0,
+            "feature": "unrealized_pnl_bps"
+          },
+          "action": {
+            "type": "close_all"
+          }
+        }
+      ]
+    }
+  ],
+  "risk_policy": {
+    "max_position": 500,
+    "inventory_cap": 1000,
+    "position_sizing": {
+      "mode": "fixed",
+      "base_size": 100,
+      "max_size": 500
+    },
+    "degradation_rules": [
+      {
+        "condition": {
+          "type": "comparison",
+          "op": ">",
+          "threshold": 15.0,
+          "feature": "spread_bps"
+        },
+        "action": {
+          "type": "block_new_entries"
+        }
+      }
+    ]
+  },
+  "regimes": [
+    {
+      "name": "scalping_regime",
+      "priority": 1,
+      "when": {
+        "type": "comparison",
+        "op": "<",
+        "threshold": 10.0,
+        "feature": "spread_bps"
+      },
+      "entry_policy_refs": [
+        "long_entry_passive",
+        "short_entry_passive"
+      ],
+      "exit_policy_ref": "fast_exit_policy"
+    }
+  ],
+  "metadata": {
+    "pipeline": "v2_openai_plan_lowering",
+    "plan_name": "short_horizon_scalping_alpha",
+    "plan_style": "scalping",
+    "research_goal": "short-horizon scalping alpha with passive entry, fast time exit, and strict spread filter",
+    "strategy_style": "scalping",
+    "latency_ms": 1.0,
+    "spec_canonical": "v2",
+    "generation_source": "openai_v2_plan",
+    "plan_schema_version": "1.0",
+    "generated_at": "2026-03-24T04:22:59.377284+00:00"
+  },
+  "execution_policy": {
+    "placement_mode": "passive_join",
+    "cancel_after_ticks": 20,
+    "max_reprices": 5
+  }
+}

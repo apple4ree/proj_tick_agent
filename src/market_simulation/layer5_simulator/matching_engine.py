@@ -4,10 +4,16 @@ matching_engine.py
 Core fill simulation engine for Layer 5.
 
 MatchingEngine simulates how a child order interacts with the LOB to produce
-a fill. It borrows the main ideas from `hftbacktest`:
+a fill.  It handles:
   - exchange model switch for no-partial vs partial-fill behavior
-  - queue-position models for passive fills at the touch
-  - maker-only protection for post-only orders
+  - marketable / crossing limit fill with level walking
+  - resting limit fill based on observed trade volume
+  - maker-only (GTX) protection for post-only orders
+
+Queue-position semantics (queue initialization, queue advancement, queue gate)
+are NOT handled here.  They are the sole responsibility of FillSimulator
+(layer7_validation).  By the time an order reaches MatchingEngine, any
+queue gate has already been resolved upstream.
 """
 from __future__ import annotations
 
@@ -25,6 +31,7 @@ from execution_planning.layer3_order.order_types import OrderSide, OrderTIF, Ord
 
 
 class QueueModel(Enum):
+    NONE = "NONE"
     PRICE_TIME = "PRICE_TIME"
     RISK_ADVERSE = "RISK_ADVERSE"
     PROB_QUEUE = "PROB_QUEUE"
@@ -40,6 +47,13 @@ class ExchangeModel(Enum):
 class MatchingEngine:
     """
     Simulates exchange matching of child orders against the order book.
+
+    Pure matching logic only: price/qty/exchange-model.  Queue-position
+    semantics are handled upstream by FillSimulator.
+
+    Parameters ``queue_model`` and ``queue_position_assumption`` are accepted
+    for backward-compatible construction but are **not used** in matching
+    decisions.  Queue filtering is the sole responsibility of FillSimulator.
     """
 
     def __init__(
@@ -51,10 +65,11 @@ class MatchingEngine:
         rng_seed: int | None = None,
     ) -> None:
         self.exchange_model = exchange_model
+        # Retained for introspection / config round-tripping; not used in
+        # matching decisions (queue gate lives in FillSimulator).
         self.queue_model = queue_model
         self.queue_position_assumption = float(np.clip(queue_position_assumption, 0.0, 1.0))
         self.partial_fill_allowed = partial_fill_allowed
-        self._rng = np.random.default_rng(rng_seed)
 
     def match(
         self,
@@ -135,6 +150,12 @@ class MatchingEngine:
         book: "OrderBookSimulator",
         state: "MarketState",
     ) -> tuple[int, float]:
+        """Fill a non-marketable resting limit order.
+
+        Queue-position filtering is handled upstream by FillSimulator.
+        Here we only check whether observed trade activity at or through the
+        order's price level justifies a fill, and apply exchange-model rules.
+        """
         trade_through_qty, trade_touch_qty = self._trade_volume_against_order(child, state)
 
         if trade_through_qty > 0:
@@ -145,8 +166,8 @@ class MatchingEngine:
         if trade_touch_qty <= 0:
             return 0, 0.0
 
-        accessible = self._queue_accessible_qty(child, book, trade_touch_qty)
-        fillable = min(child.qty, accessible)
+        # Queue gate already resolved upstream — fill up to observed volume.
+        fillable = min(child.qty, trade_touch_qty)
         if self.exchange_model == ExchangeModel.NO_PARTIAL_FILL and fillable < child.qty:
             return 0, 0.0
         if fillable <= 0:
@@ -204,50 +225,3 @@ class MatchingEngine:
             return 0, last_volume
         return 0, 0
 
-    def _queue_accessible_qty(
-        self,
-        child: "ChildOrder",
-        book: "OrderBookSimulator",
-        trade_qty: int,
-    ) -> int:
-        if trade_qty <= 0:
-            return 0
-
-        resting_volume = book.level_volume_at_price(child.side, child.price)
-
-        if self.queue_model == QueueModel.PRO_RATA:
-            return self._pro_rata_fill(child.qty, resting_volume, trade_qty)
-        if self.queue_model == QueueModel.RANDOM:
-            return int(self._rng.integers(0, trade_qty + 1))
-
-        queue_ahead = self._queue_ahead_qty(resting_volume, self.queue_position_assumption)
-        accessible = max(0, int(trade_qty - queue_ahead))
-        if self.queue_model == QueueModel.PROB_QUEUE:
-            optimistic_access = int(trade_qty * (1.0 - self.queue_position_assumption**2))
-            accessible = min(trade_qty, max(accessible, optimistic_access))
-        return accessible
-
-    def _queue_ahead_qty(
-        self,
-        resting_volume: int,
-        queue_pos: float,
-    ) -> int:
-        if resting_volume <= 0:
-            return 0
-        if self.queue_model in {QueueModel.PRICE_TIME, QueueModel.RISK_ADVERSE}:
-            fraction_ahead = queue_pos
-        elif self.queue_model == QueueModel.PROB_QUEUE:
-            fraction_ahead = queue_pos**2
-        else:
-            fraction_ahead = queue_pos
-        return max(0, int(resting_volume * fraction_ahead))
-
-    def _pro_rata_fill(
-        self,
-        order_qty: int,
-        resting_volume: int,
-        trade_qty: int,
-    ) -> int:
-        total_available = max(1, resting_volume + order_qty)
-        fill_ratio = min(1.0, order_qty / total_available)
-        return int(fill_ratio * trade_qty)

@@ -1,0 +1,30 @@
+{
+  "strategy_id": "short_horizon_scalping_alpha_v2.0",
+  "name": "short_horizon_scalping_alpha",
+  "version": "2.0",
+  "status": "reviewed",
+  "created_at": "2026-03-24T04:22:59.379684+00:00",
+  "generation_backend": "openai",
+  "generation_mode": "live",
+  "static_review_passed": true,
+  "approved_for_backtest": false,
+  "approved_for_live": false,
+  "spec_format": "v2",
+  "spec_path": "/home/dgu/tick/proj_rl_agent/strategies/short_horizon_scalping_alpha_v2.0.json",
+  "trace_path": "/home/dgu/tick/proj_rl_agent/outputs/strategy_traces/short_horizon_scalping_alpha_v2.0_trace.json",
+  "extra": {
+    "generation": {
+      "generation_outcome": "success",
+      "static_review_passed": true,
+      "fallback_used": false,
+      "fallback_count": 0,
+      "fallback_events": [],
+      "generation_class": "openai_v2_plan",
+      "requested_backend": "openai",
+      "effective_backend": "openai_v2",
+      "requested_mode": "live",
+      "effective_mode": "live",
+      "spec_format": "v2"
+    }
+  }
+}

@@ -111,6 +111,9 @@ class ReportBuilder:
         plots_dir.mkdir(exist_ok=True)
 
         summary = result.summary()
+        # Include observation-lag diagnostics in the summary for traceability
+        if "observation_lag" in result.metadata:
+            summary["observation_lag"] = result.metadata["observation_lag"]
         with open(run_dir / "summary.json", "w", encoding="utf-8") as fh:
             json.dump(summary, fh, indent=2, default=str)
 
@@ -223,9 +226,13 @@ class ReportBuilder:
     def _generate_plots(run_dir: Path) -> None:
         """Generate visualization plots from saved CSVs."""
         try:
-            from scripts.visualize import generate_all_plots
+            import importlib.util
 
-            paths = generate_all_plots(run_dir, show=False)
+            _viz_path = Path(__file__).resolve().parents[3] / "scripts" / "internal" / "adhoc" / "visualize.py"
+            _spec = importlib.util.spec_from_file_location("visualize_script", _viz_path)
+            _mod = importlib.util.module_from_spec(_spec)  # type: ignore[arg-type]
+            _spec.loader.exec_module(_mod)  # type: ignore[union-attr]
+            paths = _mod.generate_all_plots(run_dir, show=False)
             logger.info("Generated %d plots in %s", len(paths), run_dir / "plots")
         except Exception as exc:  # noqa: BLE001
             logger.warning("Plot generation skipped: %s", exc)

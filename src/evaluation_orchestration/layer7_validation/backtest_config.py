@@ -77,10 +77,19 @@ class LatencyConfig:
 
 @dataclass
 class ExchangeConfig:
-    """Exchange simulation configuration."""
+    """Exchange simulation configuration.
+
+    Queue models (all handled exclusively by FillSimulator):
+      - none         : queue gate disabled, immediate fill eligibility
+      - price_time   : strict FIFO conservative; trade-only advancement
+      - risk_adverse : trade-only advancement (same decay as price_time)
+      - prob_queue   : trade + partial depth-drop credit (default)
+      - random       : trade + stochastic depth-drop credit (seed-deterministic)
+      - pro_rata     : risk_adverse gate + size-proportional fill allocation
+    """
     exchange_model: str = "partial_fill"        # partial_fill | no_partial_fill
-    queue_model: str = "prob_queue"             # price_time | risk_adverse | prob_queue | pro_rata | random
-    queue_position_assumption: float = 0.5      # Assumed queue position (0.0 = front, 1.0 = back)
+    queue_model: str = "prob_queue"             # none | price_time | risk_adverse | prob_queue | pro_rata | random
+    queue_position_assumption: float = 0.5       # Assumed queue position (0.0 = front, 1.0 = back)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -182,7 +191,9 @@ class BacktestConfig:
     exchange_model : str
         'partial_fill' | 'no_partial_fill' (flat)
     queue_model : str
-        'prob_queue' | 'risk_adverse' | 'price_time' | 'pro_rata' | 'random' (flat)
+        'none' | 'prob_queue' | 'risk_adverse' | 'price_time' | 'pro_rata' | 'random' (flat)
+    queue_position_assumption : float
+        Queue ahead percentile for probabilistic queue advancement (flat).
     compute_attribution : bool
         Whether to run the full attribution analysis (slower).
     annualization_factor : int
@@ -215,6 +226,14 @@ class BacktestConfig:
     impact_model: str = "linear"
     exchange_model: str = "partial_fill"
     queue_model: str = "prob_queue"
+    queue_position_assumption: float = 0.5
+    # Observation lag: strategy sees market data delayed by this amount (ms).
+    # 0.0 = no delay (current behavior).  When > 0, PipelineRunner performs
+    # actual past-state lookup (not a timestamp shift).
+    # Meaningful only when the state stream resolution is fine enough:
+    #   - "1s"    : small delays (< 1000ms) often collapse to same state
+    #   - "500ms" : moderate delays (>= 200ms) yield distinct observed_state
+    market_data_delay_ms: float = 0.0
 
     compute_attribution: bool = True
     annualization_factor: int = 252
@@ -244,6 +263,7 @@ class BacktestConfig:
             self.exchange = ExchangeConfig(
                 exchange_model=self.exchange_model,
                 queue_model=self.queue_model,
+                queue_position_assumption=self.queue_position_assumption,
             )
         if self.slicing is None:
             self.slicing = SlicingConfig(algo=self.slicing_algo)
@@ -281,9 +301,14 @@ class BacktestConfig:
         # Exchange config
         if self.exchange.exchange_model not in {"partial_fill", "no_partial_fill"}:
             errors.append(f"exchange.exchange_model must be 'partial_fill' or 'no_partial_fill', got '{self.exchange.exchange_model}'")
-        valid_queue = {"price_time", "risk_adverse", "prob_queue", "pro_rata", "random"}
+        valid_queue = {"none", "price_time", "risk_adverse", "prob_queue", "pro_rata", "random"}
         if self.exchange.queue_model not in valid_queue:
             errors.append(f"exchange.queue_model must be one of {valid_queue}, got '{self.exchange.queue_model}'")
+        if not 0.0 <= self.exchange.queue_position_assumption <= 1.0:
+            errors.append(
+                "exchange.queue_position_assumption must be in [0, 1], "
+                f"got {self.exchange.queue_position_assumption}"
+            )
 
         # Slicing config
         if self.slicing.algo.upper() not in {"TWAP", "VWAP", "POV", "AC"}:
@@ -325,6 +350,8 @@ class BacktestConfig:
             "impact_model": self.impact_model,
             "exchange_model": self.exchange_model,
             "queue_model": self.queue_model,
+            "queue_position_assumption": self.queue_position_assumption,
+            "market_data_delay_ms": self.market_data_delay_ms,
             "compute_attribution": self.compute_attribution,
             "annualization_factor": self.annualization_factor,
             # Nested configs
@@ -352,6 +379,8 @@ class BacktestConfig:
             "seed": int,
             "latency_ms": float,
             "annualization_factor": int,
+            "queue_position_assumption": float,
+            "market_data_delay_ms": float,
         }
         for field_name, type_fn in numeric_fields.items():
             if field_name in d and isinstance(d[field_name], str):

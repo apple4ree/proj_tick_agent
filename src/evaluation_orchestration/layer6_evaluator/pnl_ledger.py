@@ -202,8 +202,62 @@ class PnLLedger:
 
     def __init__(self) -> None:
         self.entries: list[PnLEntry] = []
-        # Track open position cost basis: symbol -> (avg_price, qty)
+        # Track open position cost basis: symbol -> (avg_price, signed_qty)
+        # Positive qty = long, negative qty = short.
         self._open_positions: dict[str, tuple[float, int]] = {}
+
+    # ------------------------------------------------------------------
+    # Internal position tracking
+    # ------------------------------------------------------------------
+
+    def _update_position(
+        self,
+        symbol: str,
+        side: "OrderSide",
+        fill_qty: int,
+        fill_price: float,
+    ) -> float:
+        """Update internal position and return realized PnL.
+
+        Handles long open/close, short open/cover, and position flips.
+        """
+        from execution_planning.layer3_order.order_types import OrderSide
+
+        avg_price, pos = self._open_positions.get(symbol, (0.0, 0))
+        delta = fill_qty if side == OrderSide.BUY else -fill_qty
+        new_pos = pos + delta
+        realized = 0.0
+
+        # Closing phase: fill opposes existing position
+        if pos != 0 and ((pos > 0) != (delta > 0)):
+            close_qty = min(abs(delta), abs(pos))
+            if pos > 0:
+                # Closing long: profit = (sell_price - avg_cost) * qty
+                realized = close_qty * (fill_price - avg_price)
+            else:
+                # Covering short: profit = (avg_sell - buy_price) * qty
+                realized = close_qty * (avg_price - fill_price)
+
+        # Update average cost
+        if new_pos == 0:
+            new_avg = 0.0
+        elif pos == 0:
+            # Opening from flat
+            new_avg = fill_price
+        elif (pos > 0) == (delta > 0):
+            # Same direction: weighted average
+            old_abs = abs(pos)
+            new_abs = abs(new_pos)
+            new_avg = (avg_price * old_abs + fill_price * fill_qty) / new_abs
+        elif (pos > 0) == (new_pos > 0):
+            # Partial close, direction unchanged — avg unchanged
+            new_avg = avg_price
+        else:
+            # Position flipped — the new portion opens at fill_price
+            new_avg = fill_price
+
+        self._open_positions[symbol] = (new_avg, new_pos)
+        return realized
 
     # ------------------------------------------------------------------
     # Recording
@@ -218,13 +272,20 @@ class PnLLedger:
         """
         Create a PnLEntry from a FillEvent.
 
+        Handles four accounting paths:
+        - Long open (BUY when flat/long): realized=0, avg cost updated
+        - Long close (SELL when long): realized = (fill_price - avg) * qty
+        - Short open (SELL when flat/short): realized=0, avg cost updated
+        - Short cover (BUY when short): realized = (avg - fill_price) * qty
+        - Position flip: close existing + open opposite in one fill
+
         매개변수
         ----------
         fill : FillEvent
             Completed fill from the matching engine.
         cost_basis : float
-            FIFO average cost price for the position being reduced (for sells).
-            For buys, this equals fill.fill_price.
+            Advisory cost basis from bookkeeper (kept for API compat).
+            Internal position tracking is used for PnL computation.
         mark_price : float
             Current mark price for unrealized PnL computation.
 
@@ -235,31 +296,15 @@ class PnLLedger:
         from execution_planning.layer3_order.order_types import OrderSide
 
         notional = float(fill.filled_qty) * fill.fill_price
+        sym = fill.symbol
 
-        # Realized PnL: for buys = 0 (we just opened), for sells = gain vs cost
-        if fill.side == OrderSide.BUY:
-            realized = 0.0
-            # Update open position tracking
-            sym = fill.symbol
-            existing_price, existing_qty = self._open_positions.get(sym, (0.0, 0))
-            new_qty = existing_qty + fill.filled_qty
-            new_avg = (
-                (existing_price * existing_qty + fill.fill_price * fill.filled_qty)
-                / new_qty
-                if new_qty > 0
-                else 0.0
-            )
-            self._open_positions[sym] = (new_avg, new_qty)
-        else:  # SELL
-            realized = (fill.fill_price - cost_basis) * fill.filled_qty
-            sym = fill.symbol
-            existing_price, existing_qty = self._open_positions.get(sym, (0.0, 0))
-            new_qty = max(0, existing_qty - fill.filled_qty)
-            self._open_positions[sym] = (existing_price, new_qty)
+        realized = self._update_position(
+            sym, fill.side, fill.filled_qty, fill.fill_price,
+        )
 
-        # Unrealized PnL on remaining open position
-        sym_price, sym_qty = self._open_positions.get(fill.symbol, (0.0, 0))
-        unrealized = (mark_price - sym_price) * sym_qty if sym_qty > 0 else 0.0
+        # Unrealized PnL on remaining open position (works for signed qty)
+        sym_price, sym_qty = self._open_positions.get(sym, (0.0, 0))
+        unrealized = (mark_price - sym_price) * sym_qty if sym_qty != 0 else 0.0
 
         # Decompose costs from fill metadata
         slippage_cost = abs(fill.slippage_bps) * notional / 10_000.0
@@ -304,11 +349,13 @@ class PnLLedger:
         price : float
             Current market price.
         qty : int
-            Current position size in shares.
+            Current position size in shares (signed: positive=long, negative=short).
         timestamp : pd.Timestamp
         """
-        avg_cost, _ = self._open_positions.get(symbol, (price, qty))
-        unrealized = (price - avg_cost) * qty
+        avg_cost, tracked_qty = self._open_positions.get(symbol, (0.0, 0))
+        # Use internal tracked qty when available; fall back to caller qty
+        effective_qty = tracked_qty if tracked_qty != 0 else qty
+        unrealized = (price - avg_cost) * effective_qty
 
         entry = PnLEntry(
             timestamp=timestamp,
@@ -336,17 +383,28 @@ class PnLLedger:
         price : float
             Exit price.
         qty : int
-            Number of shares closed.
+            Number of shares to close (always positive).
         timestamp : pd.Timestamp
         fees : float
             Explicit fees on this closing trade.
         """
         avg_cost, open_qty = self._open_positions.get(symbol, (price, 0))
-        closed_qty = min(qty, open_qty)
-        realized = (price - avg_cost) * closed_qty
 
-        new_qty = open_qty - closed_qty
-        self._open_positions[symbol] = (avg_cost, new_qty)
+        if open_qty > 0:
+            # Closing long
+            closed_qty = min(qty, open_qty)
+            realized = (price - avg_cost) * closed_qty
+            new_qty = open_qty - closed_qty
+        elif open_qty < 0:
+            # Covering short
+            closed_qty = min(qty, abs(open_qty))
+            realized = (avg_cost - price) * closed_qty
+            new_qty = open_qty + closed_qty
+        else:
+            realized = 0.0
+            new_qty = 0
+
+        self._open_positions[symbol] = (avg_cost if new_qty != 0 else 0.0, new_qty)
 
         entry = PnLEntry(
             timestamp=timestamp,

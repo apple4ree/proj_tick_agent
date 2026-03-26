@@ -30,9 +30,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--spec-format", default=None, choices=["v2"],
                         help="Spec format (fixed to v2)")
     parser.add_argument("--backend", default=None,
-                        help="Override generation backend (template | openai)")
+                        help="Generation backend: 'template' (keyword→template→lower) "
+                             "or 'openai' (goal→structured plan→lower→review)")
     parser.add_argument("--mode", default=None,
-                        help="Override OpenAI mode (live | mock | replay)")
+                        help="OpenAI client mode: 'live' (real API), 'mock' (deterministic fixture), "
+                             "'replay' (cached responses). Only affects backend=openai.")
+    parser.add_argument("--model", default=None,
+                        help="Override OpenAI model (default: from config or gpt-4o)")
     parser.add_argument("--auto-approve", action="store_true", default=None,
                         help="Auto-approve generated spec")
     parser.add_argument("--direct", action="store_true",
@@ -73,10 +77,15 @@ def _run_direct(args: argparse.Namespace, cfg: dict) -> None:
     mode = args.mode or gen["mode"]
     auto_approve = args.auto_approve if args.auto_approve is not None else gen["auto_approve"]
 
+    model = args.model or gen.get("openai_model", "gpt-4o")
+    replay_path = gen.get("replay_path")
+
     generator = StrategyGenerator(
         latency_ms=gen["latency_ms"],
         backend=backend,
         mode=mode,
+        model=model,
+        replay_path=replay_path,
         spec_format="v2",
         allow_template_fallback=gen["allow_template_fallback"],
         allow_heuristic_fallback=gen["allow_heuristic_fallback"],

@@ -40,7 +40,7 @@ for path in (PROJECT_ROOT, SRC_ROOT):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from data.layer0_data import DataIngester, MarketStateBuilder
+from data.layer0_data import DataIngester, MarketStateBuilder, validate_resample_freq
 from evaluation_orchestration.layer7_validation import (
     BacktestConfig,
     BacktestResult,
@@ -137,6 +137,10 @@ def build_config(args: argparse.Namespace, bt_cfg: dict | None = None) -> Backte
         latency_ms=bt.get("latency_ms", 1.0),
         fee_model=bt.get("fee_model", "krx"),
         impact_model=bt.get("impact_model", "linear"),
+        exchange_model=bt.get("exchange_model", "partial_fill"),
+        queue_model=bt.get("queue_model", "prob_queue"),
+        queue_position_assumption=bt.get("queue_position_assumption", 0.5),
+        market_data_delay_ms=float(bt.get("market_data_delay_ms", 0.0)),
         compute_attribution=bt.get("compute_attribution", True),
     )
 
@@ -163,6 +167,7 @@ def run_backtest(args: argparse.Namespace, cfg: dict | None = None) -> BacktestR
 
     data_dir = paths["data_dir"]
     resample = bt.get("resample", "1s")
+    validate_resample_freq(resample)
     lookback = bt.get("trade_lookback", 100)
     output_dir = paths.get("outputs_dir", "outputs") + "/backtests"
 
@@ -224,6 +229,10 @@ def backtest_config_from_cfg(
         "latency_ms": bt.get("latency_ms", 1.0),
         "fee_model": bt.get("fee_model", "krx"),
         "impact_model": bt.get("impact_model", "linear"),
+        "exchange_model": bt.get("exchange_model", "partial_fill"),
+        "queue_model": bt.get("queue_model", "prob_queue"),
+        "queue_position_assumption": bt.get("queue_position_assumption", 0.5),
+        "market_data_delay_ms": float(bt.get("market_data_delay_ms", 0.0)),
         "compute_attribution": bt.get("compute_attribution", True),
     }
     base.update(overrides)
@@ -299,6 +308,7 @@ def main() -> None:
     end_date = config.end_date
     data_dir = paths["data_dir"]
     resample = bt.get("resample", "1s")
+    validate_resample_freq(resample)
     lookback = bt.get("trade_lookback", 100)
     output_dir = paths.get("outputs_dir", "outputs") + "/backtests"
 

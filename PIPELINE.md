@@ -36,7 +36,7 @@ MarketState[] (LOB 스냅샷 + 피처 + 메타데이터)
 
 ### 2-1. 전략 생성
 
-**Shell 런처**: `./scripts/submit_generation_job.sh "<goal>"`
+**Shell 런처**: `./scripts/internal/ops/submit_generation_job.sh "<goal>"`
 **Python**: `scripts/generate_strategy.py --goal "<goal>"`
 **Config**: `conf/generation.yaml`
 **모듈**: `src/strategy_block/strategy_generation/`
@@ -162,20 +162,32 @@ PnL 계산, execution quality, 단일/Universe 백테스트, worker orchestratio
 
 ### 5-1. 단일 종목 백테스트
 
-**Shell**: `./scripts/submit_backtest_job.sh --strategy <name> --version <ver> --symbol <sym> --start-date <date>`
+**Shell**: `./scripts/internal/ops/submit_backtest_job.sh --strategy <name> --version <ver> --symbol <sym> --start-date <date>`
 **직접 실행**: `scripts/backtest.py --spec <path> --symbol <sym> --start-date <date>`
 **Config**: `conf/backtest_base.yaml` + `conf/backtest_worker.yaml`
 
 ```
 CompiledStrategy + MarketState[]
   ↓  PipelineRunner.run()
+  ↓  observed_state = lookup(market_data_delay_ms)  ← strategy decisions
+  ↓  true_state = current state                      ← fill/matching
+  ↓  FillSimulator (queue gate → MatchingEngine → impact/fee)
   ↓  Bookkeeper → PnLLedger → Reports
 BacktestResult (summary JSON + artifacts)
 ```
 
+`market_data_delay_ms` (default 0.0) controls observation lag: the strategy
+sees a historical market snapshot while fills execute against the current LOB.
+Supported resample resolutions: `1s` (default baseline), `500ms` (realism-oriented).
+At `500ms`, moderate lag (≥ 200ms) yields distinct `observed_state`; at `1s`,
+small sub-second lag often collapses to the same state.
+Result metadata exposes `configured_market_data_delay_ms`, `resample_interval`,
+and `avg_observation_staleness_ms` for traceability.
+Queue models are explicit interfaces in `queue_models/` (6 models, gate-only or gate+allocation).
+
 ### 5-2. Universe 백테스트 (다종목 × 다 latency)
 
-**Shell**: `./scripts/submit_backtest_job.sh --strategy <name> --version <ver> --universe --start-date <date>`
+**Shell**: `./scripts/internal/ops/submit_backtest_job.sh --strategy <name> --version <ver> --universe --start-date <date>`
 **직접 실행**: `scripts/backtest_strategy_universe.py --spec <path> --start-date <date>`
 
 ```

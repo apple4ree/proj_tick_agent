@@ -15,7 +15,7 @@ ChildOrder를 LOB 기반으로 체결 시뮬레이션하고, 시장충격/수수
 
 | 파일 | 핵심 클래스 | 역할 |
 |------|-----------|------|
-| `matching_engine.py` | `MatchingEngine` | LOB walk + 대기열 시뮬레이션, TIF/GTX 강제 |
+| `matching_engine.py` | `MatchingEngine` | LOB walk + 순수 매칭 (price/qty/exchange-model), TIF/GTX 강제. 대기열 시뮬레이션은 FillSimulator(layer7) 전담 |
 | `impact_model.py` | `LinearImpact`, `SquareRootImpact`, `ZeroImpact`, `SpreadCostModel` | 시장충격 + 스프레드 비용 |
 | `fee_model.py` | `KRXFeeModel`, `ZeroFeeModel` | 수수료 + 증권거래세 (KOSPI/KOSDAQ) |
 | `latency_model.py` | `LatencyModel`, `LatencyProfile` | 확률적 지연 + 관측 지연 적용 |
@@ -23,15 +23,27 @@ ChildOrder를 LOB 기반으로 체결 시뮬레이션하고, 시장충격/수수
 | `order_book.py` | `OrderBookSimulator` | LOB 쿼리 (best quote, walk book, depth) |
 | `micro_events.py` | `MicroEventHandler` | VI/거래정지/세션 변경 감지 |
 
-## 대기열 모델 (5종)
+## 대기열 모델 (6종, FillSimulator 전담)
 
-| 모델 | 특성 |
-|------|------|
-| PRICE_TIME | 표준 FIFO |
-| RISK_ADVERSE | 보수적 추정 |
-| PROB_QUEUE (기본) | q² 기반 적당히 낙관적 |
-| PRO_RATA | 비례 배분 |
-| RANDOM | 균일 랜덤 |
+| 모델 | 유형 | 특성 |
+|------|------|------|
+| NONE | — | Queue gate 비활성 |
+| PRICE_TIME | Gate-only | 표준 FIFO conservative (trade-only advancement) |
+| RISK_ADVERSE | Gate-only | 보수적 추정 (trade-only advancement) |
+| PROB_QUEUE (기본) | Gate-only | trade + depth-drop partial credit |
+| RANDOM | Gate-only | trade + stochastic depth-drop (seed-deterministic) |
+| PRO_RATA | Gate+Allocation | conservative gate + size-proportional fill cap |
+
+> **Fill-rule ownership contract:**
+> `QueueModel` enum은 `matching_engine.py`에 backward-compat용으로 남아 있지만,
+> 대기열 판단 로직(queue initialization / advancement / gate / fill allocation)은
+> **FillSimulator** (layer7)가 `queue_models/` 패키지의 명시적 `QueueModel` 인터페이스를
+> 통해 단독으로 수행한다. MatchingEngine은 순수 매칭(price/qty/exchange-model)만 담당하며
+> queue state를 해석하지 않는다.
+>
+> 이 계약은 `tests/test_backtest_realism.py::TestFillRuleOwnership`과
+> `tests/test_backtest_realism.py::TestMatchingEngineQueueFree`에서 regression test로
+> 고정되어 있다. Queue logic을 MatchingEngine에 다시 넣지 말 것.
 
 ## 수수료 구조 (KRX)
 

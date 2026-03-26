@@ -16,6 +16,16 @@ KNOWN_FEATURES: set[str] = {
     "bid_depth", "ask_depth",
 }
 
+# Names that may ONLY appear as position_attr, never as feature.
+# Using these as feature causes silent runtime failure (features.get returns 0.0).
+POSITION_ATTR_ONLY: set[str] = {
+    "holding_ticks",
+    "unrealized_pnl_bps",
+    "entry_price",
+    "position_size",
+    "position_side",
+}
+
 
 @dataclass
 class ReviewIssue:

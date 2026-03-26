@@ -46,6 +46,18 @@ Signal의 `tags.placement_mode`로 override 가능 (hint-level 소비).
 
 **전면 반영은 아님.** `adaptation_rules`, `do_not_trade_when` 등은 Compiler(Layer 상위)에서 처리되고, 이 레이어에서는 signal tags를 통해 간접 수신한다.
 
+## Passive Queue Approximation
+
+Layer 7의 `FillSimulator`는 passive 성격의 child limit 주문에 한해 최소 queue-position 모델을 적용한다.
+
+- L2 기반 근사치: 주문 제출 시점의 해당 price level displayed qty를 `queue_ahead_qty`로 초기화
+- `risk_adverse`: 동일 가격 체결량만 ahead queue 감소로 인정
+- `prob_queue`: 동일 가격 체결량 + 일부 depth 감소를 ahead queue 감소로 인정
+- `queue_model=none`: queue gate 비활성화 (기존 즉시 체결 경로 유지)
+- aggressive/marketable 주문은 queue gate를 우회하고 기존 체결 경로를 따른다
+
+이 모델은 passive fill 과대평가를 줄이기 위한 최소 L2 근사이며, full L3 재구성/venue-specific OMS를 대체하지 않는다.
+
 ## 주의사항
 
 - SafetyGuardrails: 80% 시간 경과 + 50% 잔량 + 200bps 역행 시 긴급 청산(MARKET) 발동

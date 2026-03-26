@@ -5,7 +5,7 @@
 # Universe 백테스트 latency sweep, execution gate 등 워커·실행 계층 전용 설정.
 #
 # 공통 백테스트 기본값 → backtest_base.yaml
-# qlib 스타일 상세 설정 (config stack 미포함) → backtest_core.yaml
+# qlib 스타일 상세 설정 (config stack 미포함) → advanced/backtest_core.yaml
 
 backtest_worker:
   # Universe 백테스트 latency sweep

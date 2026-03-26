@@ -19,6 +19,29 @@ from .market_calendar import MarketCalendar, SessionType
 from .market_state import LOBLevel, LOBSnapshot, MarketState
 from .synchronization import DataSynchronizer
 
+# ------------------------------------------------------------------
+# Supported resample resolutions (current phase)
+# ------------------------------------------------------------------
+# Only these two are officially supported.
+#   - "1s"   : default public baseline
+#   - "500ms": the only realism-oriented resolution in the current phase
+# Other sub-second values (100ms, 250ms, …) are NOT supported.
+SUPPORTED_RESAMPLE_FREQS: frozenset[str] = frozenset({"1s", "500ms"})
+
+
+def validate_resample_freq(freq: str | None) -> None:
+    """Raise ``ValueError`` if *freq* is not a supported resample resolution.
+
+    ``None`` is accepted (means "no resample").
+    """
+    if freq is None:
+        return
+    if freq not in SUPPORTED_RESAMPLE_FREQS:
+        raise ValueError(
+            f"Unsupported resample frequency '{freq}'. "
+            f"Supported values for the current phase: {sorted(SUPPORTED_RESAMPLE_FREQS)}"
+        )
+
 
 @dataclass
 class StateBuildResult:
@@ -72,6 +95,7 @@ class MarketStateBuilder:
         resample_freq: str | None = None,
         ingester_cls: Type[DataIngester] = DataIngester,
     ) -> None:
+        validate_resample_freq(resample_freq)
         self.data_dir = Path(data_dir) if data_dir is not None else None
         self.ingester = ingester_cls(self.data_dir) if self.data_dir is not None else None
         self.cleaner = cleaner or DataCleaner()
@@ -126,6 +150,7 @@ class MarketStateBuilder:
         """
         원시 또는 부분 전처리된 LOB/체결 DataFrame을 MarketState 객체로 변환한다.
         """
+        validate_resample_freq(resample_freq)
         n_input_rows = len(lob_df)
         if lob_df.empty:
             empty_stats = CleaningStats(0, 0, 0, 0, 0, 0)

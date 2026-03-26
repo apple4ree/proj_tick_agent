@@ -142,9 +142,51 @@ def test_max_reprices_override_applies_to_cancel_replace():
         current_time=ts1,
         max_reprices=1,
     )
-    assert actions[0]["action"] == "cancel"
-    assert actions[0]["reason"] == "max_reprices_reached"
+    assert actions[0]["action"] == "keep"
+    assert actions[0]["reason"] == "max_reprices_reached_keep"
 
+
+
+def test_passive_join_short_horizon_keeps_child_alive_past_timeout_checkpoint():
+    config = BacktestConfig(
+        symbol="TEST",
+        start_date="2026-03-12",
+        end_date="2026-03-12",
+        seed=1,
+        placement_style="passive",
+        latency_ms=100.0,
+    )
+    runner = PipelineRunner(config=config, data_dir=".", strategy=_NoSignalStrategy())
+    runner._setup_components(config)
+
+    ts0 = pd.Timestamp("2026-03-12 09:00:00")
+    state0 = _make_state(ts0)
+    signal = Signal(
+        timestamp=ts0,
+        symbol="TEST",
+        score=0.9,
+        expected_return=6.0,
+        confidence=0.9,
+        horizon_steps=1,
+        tags={"placement_mode": "passive_join", "cancel_after_ticks": 1, "max_reprices": 1},
+        is_valid=True,
+    )
+
+    parent = runner._create_parent_order(signal=signal, delta=100, state=state0)
+    assert parent is not None
+    assert parent.meta.get("execution_hints", {}).get("cancel_after_ticks") == 3
+
+    children = runner._slice_order(parent, state0)
+    assert len(children) == 1
+    child = children[0]
+    runner._open_child_orders[parent.symbol] = [child]
+
+    state1 = _make_state(ts0 + pd.Timedelta(seconds=1))
+    fills = runner._process_open_orders(parent=parent, true_state=state1, observed_state=state1, events=[])
+
+    assert not fills
+    assert child.is_active
+    assert "cancel_reason" not in child.meta
 
 def test_no_tag_fallback_keeps_default_policy():
     fallback = AggressivePlacement(use_market_orders=False)

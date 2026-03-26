@@ -239,7 +239,7 @@ class TestVizProxyMidprice:
     def test_actual_quotes_suppress_proxy(self):
         """When market_quotes.csv exists, proxy should not be generated."""
         import sys
-        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "internal" / "adhoc"))
         from viz_trading_diagnostics import load_experiment_dir
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -278,7 +278,7 @@ class TestVizProxyMidprice:
     def test_proxy_flagged_when_no_quotes(self):
         """When market_quotes.csv is absent, proxy flag should be set."""
         import sys
-        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "internal" / "adhoc"))
         from viz_trading_diagnostics import load_experiment_dir
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -307,7 +307,7 @@ class TestVizProxyMidprice:
         """plot_from_dir with require_actual_quotes=True should raise
         when market_quotes.csv is missing."""
         import sys
-        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "internal" / "adhoc"))
         from viz_trading_diagnostics import plot_from_dir
 
         with tempfile.TemporaryDirectory() as tmpdir:
