@@ -183,7 +183,14 @@ class BacktestConfig:
     placement_style : str
         'spread_adaptive' | 'aggressive' | 'passive' | 'midpoint' (flat)
     latency_ms : float
-        Order-to-acknowledgement latency in milliseconds (flat).
+        Compatibility alias for venue lifecycle latency components (flat).
+        Used only when nested `latency` config is absent (`latency is None`).
+        In that legacy shorthand path, it populates:
+        - `latency.order_submit_ms`
+        - `latency.order_ack_ms`
+        - `latency.cancel_ms`
+        Once nested `latency` is present (profile-only / partial / full),
+        this alias is fully disabled.
     fee_model : str
         'krx' | 'zero' | 'flat_bps' (flat)
     impact_model : str
@@ -234,6 +241,12 @@ class BacktestConfig:
     #   - "1s"    : small delays (< 1000ms) often collapse to same state
     #   - "500ms" : moderate delays (>= 200ms) yield distinct observed_state
     market_data_delay_ms: float = 0.0
+    # Decision latency: how long the strategy takes to compute an action
+    # after observing market data (ms).  0.0 = instant decision.
+    # Separate from observation lag (which state is seen) and order submission
+    # latency (how long the venue takes to receive the order).
+    # Effective state lookup delay = market_data_delay_ms + decision_compute_ms.
+    decision_compute_ms: float = 0.0
 
     compute_attribution: bool = True
     annualization_factor: int = 252
@@ -246,6 +259,22 @@ class BacktestConfig:
     slicing: SlicingConfig | None = field(default=None)
     placement: PlacementConfig | None = field(default=None)
     risk: RiskConfig | None = field(default=None)
+    
+    
+    @staticmethod
+    def latency_alias_components(latency_ms: float) -> tuple[float, float, float]:
+        """Map flat latency_ms (compatibility alias) to nested venue latencies.
+
+        This mapping only applies to venue lifecycle latency fields:
+        - order_submit_ms
+        - order_ack_ms
+        - cancel_ms
+
+        Observation-lag semantics (`market_data_delay_ms`) are intentionally
+        not derived from this alias.
+        """
+        base = max(0.0, float(latency_ms))
+        return (base * 0.3, base * 0.7, base * 0.2)
 
     def __post_init__(self) -> None:
         self._resolve_configs()
@@ -257,8 +286,22 @@ class BacktestConfig:
             self.fee = FeeConfig(type=self.fee_model)
         if self.impact is None:
             self.impact = ImpactConfig(type=self.impact_model)
+
+        alias_submit_ms, alias_ack_ms, alias_cancel_ms = self.latency_alias_components(self.latency_ms)
+        self._latency_alias_applied = False
         if self.latency is None:
-            self.latency = LatencyConfig()
+            # Legacy shorthand path: apply flat latency_ms alias only when
+            # nested latency config is completely absent.
+            self.latency = LatencyConfig(
+                order_submit_ms=alias_submit_ms,
+                order_ack_ms=alias_ack_ms,
+                cancel_ms=alias_cancel_ms,
+            )
+            self._latency_alias_applied = True
+        else:
+            # Canonical precedence: once nested latency is present, flat
+            # latency_ms alias is fully disabled (even for None fields).
+            self._latency_alias_applied = False
         if self.exchange is None:
             self.exchange = ExchangeConfig(
                 exchange_model=self.exchange_model,
@@ -297,6 +340,14 @@ class BacktestConfig:
         # 지연 config
         if self.latency.profile not in {"default", "zero", "colocation", "retail"}:
             errors.append(f"latency.profile must be 'default', 'zero', 'colocation', or 'retail', got '{self.latency.profile}'")
+        if self.latency.order_submit_ms is not None and self.latency.order_submit_ms < 0:
+            errors.append(f"latency.order_submit_ms must be >= 0, got {self.latency.order_submit_ms}")
+        if self.latency.order_ack_ms is not None and self.latency.order_ack_ms < 0:
+            errors.append(f"latency.order_ack_ms must be >= 0, got {self.latency.order_ack_ms}")
+        if self.latency.cancel_ms is not None and self.latency.cancel_ms < 0:
+            errors.append(f"latency.cancel_ms must be >= 0, got {self.latency.cancel_ms}")
+        if self.latency.jitter_std_ms < 0:
+            errors.append(f"latency.jitter_std_ms must be >= 0, got {self.latency.jitter_std_ms}")
 
         # Exchange config
         if self.exchange.exchange_model not in {"partial_fill", "no_partial_fill"}:
@@ -327,6 +378,12 @@ class BacktestConfig:
             errors.append(f"initial_cash must be > 0, got {self.initial_cash}")
         if self.seed < 0:
             errors.append(f"seed must be >= 0, got {self.seed}")
+        if self.latency_ms < 0:
+            errors.append(f"latency_ms must be >= 0, got {self.latency_ms}")
+        if self.market_data_delay_ms < 0:
+            errors.append(f"market_data_delay_ms must be >= 0, got {self.market_data_delay_ms}")
+        if self.decision_compute_ms < 0:
+            errors.append(f"decision_compute_ms must be >= 0, got {self.decision_compute_ms}")
 
         if errors:
             raise ValueError("BacktestConfig validation failed:\n  - " + "\n  - ".join(errors))
@@ -352,6 +409,8 @@ class BacktestConfig:
             "queue_model": self.queue_model,
             "queue_position_assumption": self.queue_position_assumption,
             "market_data_delay_ms": self.market_data_delay_ms,
+            "decision_compute_ms": self.decision_compute_ms,
+            "latency_alias_applied": bool(getattr(self, "_latency_alias_applied", False)),
             "compute_attribution": self.compute_attribution,
             "annualization_factor": self.annualization_factor,
             # Nested configs
@@ -381,6 +440,7 @@ class BacktestConfig:
             "annualization_factor": int,
             "queue_position_assumption": float,
             "market_data_delay_ms": float,
+            "decision_compute_ms": float,
         }
         for field_name, type_fn in numeric_fields.items():
             if field_name in d and isinstance(d[field_name], str):
@@ -467,9 +527,9 @@ class BacktestResult:
     n_states: int
     metadata: dict = field(default_factory=dict)
 
-    def summary(self) -> dict[str, float]:
+    def summary(self) -> dict[str, Any]:
         """Flat dict of key metrics suitable for logging or comparison tables."""
-        result: dict[str, float] = {
+        result: dict[str, Any] = {
             "n_fills": float(self.n_fills),
             "n_states": float(self.n_states),
         }
@@ -521,5 +581,73 @@ class BacktestResult:
                 "timing_contribution": self.attribution_report.timing_contribution,
                 "alpha_fraction": self.attribution_report.alpha_fraction,
             })
+
+        diagnostics = self.metadata.get("realism_diagnostics", {})
+        if not isinstance(diagnostics, dict):
+            diagnostics = {}
+        observation_lag = diagnostics.get("observation_lag", self.metadata.get("observation_lag", {}))
+        decision_latency = diagnostics.get("decision_latency", self.metadata.get("decision_latency", {}))
+        tick_time = diagnostics.get("tick_time", self.metadata.get("tick_time", {}))
+        lifecycle = diagnostics.get("lifecycle", self.metadata.get("lifecycle", {}))
+        queue = diagnostics.get("queue", self.metadata.get("queue", {}))
+        latency = diagnostics.get("latency", self.metadata.get("latency", {}))
+
+        if isinstance(observation_lag, dict):
+            result["resample_interval"] = observation_lag.get("resample_interval")
+            result["canonical_tick_interval_ms"] = observation_lag.get("canonical_tick_interval_ms")
+            result["configured_market_data_delay_ms"] = observation_lag.get("configured_market_data_delay_ms")
+            result["avg_observation_staleness_ms"] = observation_lag.get("avg_observation_staleness_ms")
+            result["effective_delay_ms"] = observation_lag.get("effective_delay_ms")
+            result["state_history_max_len"] = observation_lag.get("state_history_max_len")
+            result["strategy_runtime_lookback_ticks"] = observation_lag.get("strategy_runtime_lookback_ticks")
+
+        if isinstance(decision_latency, dict):
+            result["configured_decision_compute_ms"] = decision_latency.get("configured_decision_compute_ms")
+            result["decision_latency_enabled"] = decision_latency.get("decision_latency_enabled")
+        elif isinstance(observation_lag, dict):
+            result["configured_decision_compute_ms"] = observation_lag.get("configured_decision_compute_ms")
+            result["decision_latency_enabled"] = observation_lag.get("decision_latency_enabled")
+
+        queue_model_default = self.config.exchange.queue_model if self.config.exchange is not None else self.config.queue_model
+        queue_position_default = (
+            self.config.exchange.queue_position_assumption
+            if self.config.exchange is not None
+            else self.config.queue_position_assumption
+        )
+        if isinstance(queue, dict):
+            result["queue_model"] = queue.get("queue_model", queue_model_default)
+            result["queue_position_assumption"] = queue.get("queue_position_assumption", queue_position_default)
+        else:
+            result["queue_model"] = queue_model_default
+            result["queue_position_assumption"] = queue_position_default
+
+        if isinstance(latency, dict):
+            result["configured_order_submit_ms"] = latency.get("configured_order_submit_ms")
+            result["configured_order_ack_ms"] = latency.get("configured_order_ack_ms")
+            result["configured_cancel_ms"] = latency.get("configured_cancel_ms")
+            result["sampled_avg_submit_latency_ms"] = latency.get("sampled_avg_submit_latency_ms")
+            result["sampled_avg_cancel_latency_ms"] = latency.get("sampled_avg_cancel_latency_ms")
+            result["sampled_avg_fill_latency_ms"] = latency.get("sampled_avg_fill_latency_ms")
+            result["latency_alias_applied"] = latency.get("latency_alias_applied")
+
+        if isinstance(lifecycle, dict):
+            result["avg_child_lifetime_seconds"] = lifecycle.get("avg_child_lifetime_seconds", 0.0)
+            if "cancel_rate" in lifecycle:
+                result["cancel_rate"] = lifecycle.get("cancel_rate", result.get("cancel_rate"))
+            if "child_order_count" in lifecycle:
+                result["child_order_count"] = lifecycle.get("child_order_count")
+            elif "n_child_orders" in result:
+                result["child_order_count"] = result["n_child_orders"]
+            if "parent_order_count" in lifecycle:
+                result["parent_order_count"] = lifecycle.get("parent_order_count")
+            elif "n_parent_orders" in result:
+                result["parent_order_count"] = result["n_parent_orders"]
+            if "signal_count" in lifecycle:
+                result["signal_count"] = lifecycle.get("signal_count")
+
+        if result.get("resample_interval") is None and isinstance(tick_time, dict):
+            result["resample_interval"] = tick_time.get("resample_interval")
+        if result.get("canonical_tick_interval_ms") is None and isinstance(tick_time, dict):
+            result["canonical_tick_interval_ms"] = tick_time.get("canonical_tick_interval_ms")
 
         return result

@@ -2,7 +2,7 @@
 
 ## Status
 
-Active — Phase 1 (observation lag) + tick-time semantics alignment implemented
+Active — Phase 1 (observation lag) + tick-time semantics alignment + Phase 2 (decision latency + bounded history) + Phase 3-lite (realism diagnostics/reporting) + latency semantics cleanup/minimal lifecycle gating implemented
 
 ## Purpose
 
@@ -18,11 +18,11 @@ The goal is to improve realism while preserving the current product shape:
 - single-symbol backtest
 - universe backtest
 
-The proposed work focuses on three areas:
+The implemented realism scope in this phase focuses on three areas:
 
-1. observation lag via `observed_state` vs `true_state`
-2. queue model interface extraction inside the backtest layer
-3. explicit fill-rule ownership between `FillSimulator` and `MatchingEngine`
+1. observation lag + decision latency separation on the decision path
+2. bounded state-history retention for stable memory/performance at `500ms` and universe scale
+3. minimal venue lifecycle latency gating (`order_submit_ms`, `cancel_ms`) with lightweight diagnostics
 
 ## Current State
 
@@ -66,6 +66,73 @@ raise `ValueError` at validation time.
 - Cross-resolution comparison: tick-based params are NOT auto-normalized — this is
   benchmark/experiment responsibility
 - See `docs/analysis/tick_time_semantics_alignment.md` for full design
+
+### Decision latency (implemented — Phase 2)
+
+- `decision_compute_ms`: strategy compute time between seeing a state and acting (ms)
+- Separate from observation lag (which state is seen) and order submission latency
+  (how long the venue takes to receive the order)
+- Effective state lookup delay = `market_data_delay_ms + decision_compute_ms`
+- Applied to all decision paths: signal, target, parent order, child slice, cancel/replace
+- Fill path remains on `true_state`
+- See `docs/analysis/decision_latency_analysis.md` for design rationale
+
+### Canonical venue latency semantics (implemented)
+
+- `market_data_delay_ms` (top-level): strategy observation lag only
+- `decision_compute_ms` (top-level): strategy compute delay only
+- `latency.order_submit_ms`: child becomes queue/fill-eligible only after venue-arrival time
+- `latency.cancel_ms`: cancel becomes effective only after cancel-effective time
+- `latency.order_ack_ms`: sampled for reporting/status, not used for fill gating in this phase
+- `latency.market_data_delay_ms` is compatibility-only and not a canonical source
+
+Latency precedence is fixed as:
+
+1. `market_data_delay_ms` (top-level) is the only source for observation lag.
+2. `decision_compute_ms` (top-level) is the only source for strategy compute delay.
+3. Nested `latency.order_submit_ms`/`order_ack_ms`/`cancel_ms` are the only source for venue lifecycle latency.
+4. Flat `latency_ms` is legacy shorthand and applies only when nested `latency` is absent (`latency is None`).
+5. If nested `latency` is present (profile-only / partial / full), flat alias is fully disabled.
+
+Legacy shorthand mapping (only when `latency is None`):
+
+- `order_submit_ms = latency_ms * 0.3`
+- `order_ack_ms = latency_ms * 0.7`
+- `cancel_ms = latency_ms * 0.2`
+
+The alias never derives `market_data_delay_ms`, and single-symbol/universe paths follow the same precedence.
+
+### Minimal lifecycle gating (implemented)
+
+- Submit gating: before `venue_arrival_time`, child is not eligible for queue advance or matching
+- Cancel gating: after cancel decision, order remains live until `cancel_effective_time`; fills may happen in between
+- Replace path (intentional minimal exception): immediate cancel old child + create replacement child with fresh submit lifecycle
+- Staged replace venue workflow is deferred (full state machine not implemented in this phase)
+- No full event-driven venue simulator was added; this is a minimal state-loop gating layer
+
+### Bounded state-history retention (implemented — Phase 2)
+
+- Per-symbol `_state_history` is pruned each tick to retain only what is needed
+  for the effective delay window, strategy/runtime lookback, plus a safety buffer
+- Prevents unbounded memory growth at finer resolutions (500ms) and in universe
+  backtests with many symbols
+- maximum retention = `ceil(effective_delay_ms / tick_interval_ms) + 1 + strategy_runtime_lookback_ticks + 10` states,
+  minimum 20
+
+### Realism diagnostics and reporting (implemented — Phase 3-lite)
+
+- `summary.json` keeps a compact always-on realism slice:
+  - configured vs realized staleness, decision latency, canonical tick
+  - queue settings, bounded history knobs, child/cancel churn aggregates, venue-latency snapshot
+- `realism_diagnostics.json` stores detailed aggregate sections:
+  - `observation_lag`, `decision_latency`, `tick_time`, `lifecycle`
+  - `queue`, `latency`, `cancel_reasons`, `timings`, `config_snapshot`
+- `latency` diagnostics semantics:
+  - `configured_order_submit_ms`/`configured_order_ack_ms`/`configured_cancel_ms` are venue-latency config snapshots
+  - `latency_alias_applied` indicates whether flat `latency_ms` shorthand was used (only when nested `latency` was absent)
+  - `order_ack_used_for_fill_gating` is fixed to `false` in this phase
+- Diagnostics are interpretation artifacts only; engine semantics are unchanged
+  (no queue/matching/fill rule change in this phase).
 
 ## Design Goals
 
@@ -338,13 +405,10 @@ Relevant files:
 Minimum required config support:
 
 - `market_data_delay_ms`
+- `decision_compute_ms`
 - existing queue fields
 
-Optional follow-up:
-
-- `decision_compute_ms`
-
-The recommendation is to keep the new surface small.
+The recommendation is to keep the new surface small and semantically explicit.
 
 ## Testing impact
 
@@ -372,54 +436,45 @@ Important semantic tests:
 
 ### Phase 1 (done)
 
-Observation lag in the runner.
+Observation lag + tick-time semantics alignment.
 
 - `observed_state` / `true_state` separation implemented in `PipelineRunner`
 - `market_data_delay_ms` threaded through the main loop
 - actual past-state lookup via `bisect_right` on per-symbol timestamp list
 - supported resample resolutions enforced: `1s`, `500ms` only
-- `500ms` at moderate lag yields distinct `observed_state`
 - observation-lag diagnostics exposed in result metadata
-- queue implementation unchanged
-- runner + integration tests added
 
-### Phase 2
+### Phase 2 (done)
 
-Extract queue model interfaces.
+Decision latency + bounded state-history retention.
 
-- refactor `FillSimulator`
-- preserve existing queue behavior
-- keep `MatchingEngine` unchanged
-- expand queue regression tests
-
-### Phase 3
-
-Freeze fill-rule documentation and semantics.
-
-- update layer README files
-- align tests with documented ownership
-- optionally refine reviewer warnings
+- `decision_compute_ms` added to `BacktestConfig` + `conf/backtest_base.yaml`
+- decision path uses effective delayed lookup (`market_data_delay_ms + decision_compute_ms`)
+- signal/target/parent/child/cancel-replace decisions use delayed `observed_state`
+- fill path remains on `true_state`
+- per-symbol history retention bounded by effective delay + runtime lookback + safety buffer
+- result metadata exposes decision-latency + retention summaries
 
 ## Risks
 
 - `1s` resample may hide the effect of small lag values
 - stale-state decisions may change regression baselines substantially
-- queue interface extraction could add abstraction without payoff if over-designed
+- lookback-aware retention that is too conservative may keep more history than strictly needed
 
 ## Mitigations
 
-- start with runner-level observed-state separation only
-- keep config additions minimal
-- rely on targeted regression tests
+- keep config additions minimal (`market_data_delay_ms`, `decision_compute_ms`)
+- rely on targeted regression tests for decision path vs fill path semantics
+- keep queue/matching behavior unchanged in this phase
 - document interaction between observed-state lag and strategy-side lag expressions
 
 ## Decision Summary
 
 The recommended direction is:
 
-1. separate `observed_state` from `true_state`
-2. keep queue semantics in `FillSimulator`, but extract explicit queue model interfaces
-3. formalize fill-rule ownership between layer 7 and layer 5
+1. keep observation lag (`market_data_delay_ms`) and decision latency (`decision_compute_ms`) semantically separate
+2. keep order submit/ack/cancel latency in layer5 latency models (no double counting)
+3. keep fill path on `true_state` while bounding history retention on the decision path
 
-This path materially improves realism without breaking the current strategy
-generation / review / compile / backtest product shape.
+This path improves timing realism and runtime stability without changing public CLI shape
+or queue/matching contracts.

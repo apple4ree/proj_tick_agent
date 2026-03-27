@@ -247,6 +247,8 @@ class BacktestWorker:
                     initial_cash=payload.get("initial_cash", 1e8),
                     seed=payload.get("seed", 42),
                     compute_attribution=True,
+                    decision_compute_ms=float(payload.get("decision_compute_ms", 0.0)),
+                    market_data_delay_ms=float(payload.get("market_data_delay_ms", 0.0)),
                     start_date=start_date,
                     end_date=end_date,
                     summary_only=True,

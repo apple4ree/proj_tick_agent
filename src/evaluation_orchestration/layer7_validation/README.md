@@ -8,6 +8,7 @@
   - `observed_state` / `true_state` 분리: 전략은 지연된 시장 데이터, 체결은 실시간 데이터 사용
 - `BacktestConfig`: 설정 파싱/검증/직렬화 (flat + nested qlib-style 지원)
   - `market_data_delay_ms`: 관측 지연 설정 (0 = 기존 동작 유지)
+  - `decision_compute_ms`: 전략 판단 지연 (0 = 즉시 결정)
 - `FillSimulator`: ChildOrder 체결 위임 (matching + impact + fee + bookkeeper)
 - `queue_models/`: 큐 모델 인터페이스 (6종, QueueModel 프로토콜)
 - `ReportBuilder`: Layer 6 메트릭 조립 + 결과 저장 (JSON/CSV/plot)
@@ -21,7 +22,7 @@
 | `pipeline_runner.py` | `PipelineRunner` | MarketState[] → BacktestResult (전체 루프) |
 | `backtest_config.py` | `BacktestConfig`, `BacktestResult` | 설정 + 결과 데이터 클래스 |
 | `fill_simulator.py` | `FillSimulator` | 체결 시뮬레이션 위임 (parent overfill 방지 포함) |
-| `report_builder.py` | `ReportBuilder` | 리포트 생성 + 디스크 저장 (summary.json, CSV, plots) |
+| `report_builder.py` | `ReportBuilder` | 리포트 생성 + 디스크 저장 (summary.json, realism_diagnostics.json, CSV, plots) |
 | `component_factory.py` | `ComponentFactory` | config → 컴포넌트 인스턴스 (fee/impact/latency/slicer/placement) |
 | `reproducibility.py` | `ReproducibilityManager` | seed 설정, config hash, DataFrame hash, git version |
 
@@ -44,6 +45,49 @@ for state in states:
 
 `market_data_delay_ms=0` 이면 `observed_state == true_state` (기존 동작 보존).
 
+### Decision Latency (Phase 2)
+
+전략이 관측된 시장 데이터를 보고 실제 주문/수정 결정을 내리기까지 걸리는 시간을 모델링한다.
+
+- `decision_compute_ms`: 전략 계산 시간 (ms). 0 = 즉시 결정.
+- **effective state lookup delay = `market_data_delay_ms + decision_compute_ms`**
+- observation lag이 *어떤 데이터를 보는가*, decision latency는 *보고 나서 얼마나 걸리는가*
+- 적용 범위: signal 생성, target 계산, parent order 생성, child slicing, cancel/replace 판단 모두
+- venue latency semantics (nested `latency`)는 decision path와 분리된다:
+  - `order_submit_ms`: child가 venue 도착 전에는 queue/fill 대상 아님
+  - `cancel_ms`: cancel decision 직후에도 effective 시점 전까지 fill 가능
+  - `order_ack_ms`: 현재 phase에서는 reporting/status용 (fill gating에는 미사용)
+- flat `latency_ms`는 backward-compat shorthand이며 `latency is None`일 때만 사용된다
+  (`submit/ack/cancel = 0.3/0.7/0.2 × latency_ms`)
+- `latency`가 명시된 순간(profile-only / partial / full) flat alias는 완전히 비활성화된다
+- alias는 `market_data_delay_ms`를 파생하지 않는다
+- fill path는 여전히 `true_state` 기준
+
+타이밍 체인:
+```
+t_true (현재 시뮬레이션 시점)
+  → observed_state = lookup(t_true - market_data_delay_ms - decision_compute_ms)
+  → 전략 판단 (signal, order, cancel/replace)
+  → order submission → venue arrival (order_submit_ms)
+  → (optional) cancel request → cancel effective (cancel_ms)
+  → fill (true_state 기준, venue arrival 이후 only)
+  → ack latency(order_ack_ms)는 reporting/status aggregate로 기록
+```
+
+replace exception (intentional minimal model):
+- replace decision 시 기존 child는 즉시 cancel 처리
+- replacement child는 새 submit lifecycle(submit/arrival metadata)로 시작
+- staged replace venue workflow는 현재 scope 밖(deferred)
+
+### Bounded State-History Retention (Phase 2)
+
+per-symbol `_state_history`는 아래를 모두 반영한 최소 horizon + safety buffer만큼만 유지한다.
+- effective delay window (`market_data_delay_ms + decision_compute_ms`)
+- strategy/runtime lookback (`LagExpr`, `RollingExpr`, `PersistExpr`)
+
+매 tick마다 초과분을 pruning하여 메모리 증가를 방지한다.
+특히 `500ms` resolution과 universe backtest에서 중요하다.
+
 ### 공식 지원 해상도 (current phase)
 
 | 해상도 | 용도 |
@@ -55,7 +99,7 @@ for state in states:
 
 ### observed_state vs true_state
 
-- `observed_state`: `true_state.timestamp - market_data_delay_ms` 이하의 가장 최근 실제 historical state lookup 결과. 타임스탬프만 바꾸는 것이 아님.
+- `observed_state`: `true_state.timestamp - (market_data_delay_ms + decision_compute_ms)` 이하의 가장 최근 실제 historical state lookup 결과. 타임스탬프만 바꾸는 것이 아님.
 - `true_state`: fill/exchange-side에서 사용하는 실제 현재 시장 상태.
 
 ### runtime_v2 lag stacking
@@ -69,10 +113,17 @@ effective_lookback = observation_delay + strategy_lag_steps × resample_interval
 ### Observation-lag 리포팅
 
 결과 metadata(`observation_lag`)에서 아래 값을 확인할 수 있다:
-- `configured_market_data_delay_ms`: config에서 설정한 지연 값
+- `configured_market_data_delay_ms`: config에서 설정한 관측 지연 값
+- `configured_decision_compute_ms`: config에서 설정한 전략 판단 지연 값
+- `decision_latency_enabled`: decision latency 활성 여부
+- `effective_delay_ms`: 실질 lookup delay (관측 지연 + 판단 지연)
 - `resample_interval`: 사용한 resample 해상도
 - `canonical_tick_interval_ms`: 한 tick의 wall-clock 지속 시간 (ms)
 - `avg_observation_staleness_ms`: 실제 평균 관측 지연 (ms)
+- `avg_decision_state_age_ms`: decision path에서 사용된 state age 평균(ms)
+- `state_history_max_len`: per-symbol state history 최대 보유량
+- `strategy_runtime_lookback_ticks`: 전략 AST에서 추론된 lookback ticks
+- `history_safety_buffer_ticks`: history pruning safety buffer ticks
 
 ### Tick-time semantics
 
@@ -134,12 +185,28 @@ cap_fill(child, state, qty) → int    # 후처리 할당 (pro_rata only)
 
 ## BacktestResult 산출물
 
-- `summary.json`: 30+ 핵심 메트릭 (PnL, Sharpe, MDD, fill_rate 등)
-- `config.json`: 사용된 BacktestConfig
-- `pnl_series.csv`, `pnl_entries.csv`: PnL 상세
-- `signals.csv`, `orders.csv`, `fills.csv`: 시뮬레이션 아티팩트
-- `market_quotes.csv`: 시장 데이터
-- `plots/`: 5종 시각화 (overview, signal, execution, dashboard, intraday_cumulative_profit)
+- summary.json: 핵심 성과 메트릭 + compact realism fields
+  - resample_interval, canonical_tick_interval_ms
+  - configured_market_data_delay_ms, avg_observation_staleness_ms
+  - configured_decision_compute_ms, decision_latency_enabled, effective_delay_ms
+  - queue_model, queue_position_assumption
+  - state_history_max_len, strategy_runtime_lookback_ticks
+  - avg_child_lifetime_seconds, cancel_rate
+  - configured_order_submit_ms, configured_order_ack_ms, configured_cancel_ms, latency_alias_applied
+- realism_diagnostics.json: 상세 realism aggregate artifact
+  - observation_lag, decision_latency, tick_time, lifecycle
+  - queue, latency, cancel_reasons, timings, config_snapshot
+  - decision_latency section includes `avg_decision_state_age_ms` aggregated over decision-evaluated steps (not observation-staleness proxy)
+  - queue section includes `queue_wait_ticks`, `queue_wait_ms`, `blocked_miss_count`, `ready_but_not_filled_count`
+  - latency section includes configured_order_submit_ms/configured_order_ack_ms/configured_cancel_ms, latency_alias_applied, `order_ack_used_for_fill_gating=false`, `cancel_pending_count`, `fills_before_cancel_effective_count`, `avg_cancel_effective_lag_ms`
+  - lifecycle section includes hotspots: `max_children_per_parent`, `max_cancelled_children_per_parent`, `top_parent_by_children`
+- config.json: 사용된 BacktestConfig
+- pnl_series.csv, pnl_entries.csv: PnL 상세
+- signals.csv, orders.csv, fills.csv: 시뮬레이션 아티팩트
+- market_quotes.csv: 시장 데이터
+- plots/: 5종 시각화 (overview, signal, execution, dashboard, intraday_cumulative_profit)
+
+참고: 위 diagnostics는 해석/검증용 집계이며, queue/matching/fill semantics를 변경하지 않는다.
 
 ## 전체 파이프라인에서의 위치
 

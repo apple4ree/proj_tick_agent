@@ -176,6 +176,8 @@ def run_single_backtest(
     initial_cash: float,
     seed: int,
     compute_attribution: bool,
+    decision_compute_ms: float,
+    market_data_delay_ms: float,
     start_date: str,
     end_date: str,
     summary_only: bool = False,
@@ -201,14 +203,14 @@ def run_single_backtest(
 
     t0 = time.monotonic()
 
-    # Build latency config from ms value
-    derived_market_data_delay_ms = latency_ms * 0.1
+    # Build venue latency config from flat latency_ms compatibility alias.
+    # Observation lag is configured independently via top-level market_data_delay_ms.
+    submit_ms, ack_ms, cancel_ms = BacktestConfig.latency_alias_components(latency_ms)
     latency_config = LatencyConfig(
         profile="default",
-        order_submit_ms=latency_ms * 0.3,
-        order_ack_ms=latency_ms * 0.7,
-        cancel_ms=latency_ms * 0.2,
-        market_data_delay_ms=derived_market_data_delay_ms,
+        order_submit_ms=submit_ms,
+        order_ack_ms=ack_ms,
+        cancel_ms=cancel_ms,
         add_jitter=latency_ms > 0,
         jitter_std_ms=max(0.01, latency_ms * 0.05),
     )
@@ -220,7 +222,8 @@ def run_single_backtest(
         initial_cash=initial_cash,
         seed=seed,
         latency=latency_config,
-        market_data_delay_ms=derived_market_data_delay_ms,
+        market_data_delay_ms=market_data_delay_ms,
+        decision_compute_ms=decision_compute_ms,
         compute_attribution=compute_attribution,
     )
 
@@ -283,6 +286,8 @@ def main() -> None:
     latencies = bt_worker.get("latencies_ms", [0.0, 50.0, 100.0, 500.0, 1000.0])
     initial_cash = bt.get("initial_cash", 1e8)
     seed = bt.get("seed", 42)
+    decision_compute_ms = float(bt.get("decision_compute_ms", 0.0))
+    market_data_delay_ms = float(bt.get("market_data_delay_ms", 0.0))
     resample = bt.get("resample", "1s")
     validate_resample_freq(resample)
     base_output_dir = paths.get("outputs_dir", "outputs") + "/universe_backtest"
@@ -359,6 +364,8 @@ def main() -> None:
                 symbol=symbol, states=states, data_dir=data_dir,
                 latency_ms=lat, initial_cash=initial_cash,
                 seed=seed, compute_attribution=bt.get("compute_attribution", True),
+                decision_compute_ms=decision_compute_ms,
+                market_data_delay_ms=market_data_delay_ms,
                 start_date=start_date_fmt, end_date=end_date_fmt,
                 summary_only=True,
                 run_output_dir=run_dir,

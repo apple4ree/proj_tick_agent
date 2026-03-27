@@ -30,7 +30,11 @@ single implementation area before code changes are made.
    - Whether current queue models should remain as-is or be refined
    - Where additional realism is worth the added complexity
 
-4. [`realism_diagnostics_analysis.md`](./realism_diagnostics_analysis.md)
+4. [`latency_semantics_analysis.md`](./latency_semantics_analysis.md)
+   - Canonical latency precedence across observation, decision, and venue lifecycle timing
+   - Legacy `latency_ms` alias policy and replace-path exception semantics
+
+5. [`realism_diagnostics_analysis.md`](./realism_diagnostics_analysis.md)
    - What metrics and reports are needed to make realism features observable
    - How to expose lag/queue effects in backtest results
 
@@ -38,14 +42,16 @@ single implementation area before code changes are made.
 
 1. `observation_lag_analysis.md`
 2. `decision_latency_analysis.md`
-3. `queue_model_refinement_analysis.md`
-4. `realism_diagnostics_analysis.md`
+3. `latency_semantics_analysis.md`
+4. `queue_model_refinement_analysis.md`
+5. `realism_diagnostics_analysis.md`
 
 This order is intentional:
 
 - observation lag changes the meaning of the state seen by the strategy
 - decision latency builds on top of that timing model
-- queue refinement should be evaluated only after the timing model is stable
+- latency semantics then fixes precedence and alias behavior before deeper lifecycle work
+- queue refinement should be evaluated only after timing and precedence semantics are stable
 - diagnostics should summarize the final semantics rather than guess them
 
 ## Status Model

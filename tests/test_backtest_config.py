@@ -93,6 +93,62 @@ class TestNestedConstruction:
         assert cfg.risk.max_gross_notional == 1e8  # 기본값은 initial_cash
 
 
+class TestLatencyAliasSemantics:
+    """latency_ms compatibility alias -> nested latency mapping."""
+
+    def test_alias_populates_nested_when_latency_missing(self):
+        cfg = BacktestConfig(
+            symbol="005930",
+            start_date="2026-03-13",
+            end_date="2026-03-13",
+            latency_ms=100.0,
+        )
+        assert cfg.latency.order_submit_ms == 30.0
+        assert cfg.latency.order_ack_ms == 70.0
+        assert cfg.latency.cancel_ms == 20.0
+        assert cfg.to_dict()["latency_alias_applied"] is True
+
+    def test_alias_does_not_override_explicit_nested_latency(self):
+        cfg = BacktestConfig(
+            symbol="005930",
+            start_date="2026-03-13",
+            end_date="2026-03-13",
+            latency_ms=100.0,
+            latency=LatencyConfig(order_submit_ms=1.5, order_ack_ms=2.5, cancel_ms=3.5),
+        )
+        assert cfg.latency.order_submit_ms == 1.5
+        assert cfg.latency.order_ack_ms == 2.5
+        assert cfg.latency.cancel_ms == 3.5
+        assert cfg.to_dict()["latency_alias_applied"] is False
+
+    def test_profile_only_nested_latency_disables_alias(self):
+        cfg = BacktestConfig(
+            symbol="005930",
+            start_date="2026-03-13",
+            end_date="2026-03-13",
+            latency_ms=100.0,
+            latency=LatencyConfig(profile="retail"),
+        )
+        # Profile-only nested config must not be backfilled by flat alias.
+        assert cfg.latency.order_submit_ms is None
+        assert cfg.latency.order_ack_ms is None
+        assert cfg.latency.cancel_ms is None
+        assert cfg.to_dict()["latency_alias_applied"] is False
+
+    def test_partial_nested_latency_still_disables_alias(self):
+        cfg = BacktestConfig(
+            symbol="005930",
+            start_date="2026-03-13",
+            end_date="2026-03-13",
+            latency_ms=100.0,
+            latency=LatencyConfig(profile="retail", order_submit_ms=1.5),
+        )
+        assert cfg.latency.order_submit_ms == 1.5
+        assert cfg.latency.order_ack_ms is None
+        assert cfg.latency.cancel_ms is None
+        assert cfg.to_dict()["latency_alias_applied"] is False
+
+
 class TestValidation:
     """config validation을 테스트한다."""
 
@@ -157,6 +213,24 @@ class TestValidation:
                 start_date="2026-03-13",
                 end_date="2026-03-13",
                 initial_cash=0,
+            )
+
+    def test_negative_market_data_delay_raises(self):
+        with pytest.raises(ValueError, match="market_data_delay_ms must be >= 0"):
+            BacktestConfig(
+                symbol="005930",
+                start_date="2026-03-13",
+                end_date="2026-03-13",
+                market_data_delay_ms=-1.0,
+            )
+
+    def test_negative_decision_compute_raises(self):
+        with pytest.raises(ValueError, match="decision_compute_ms must be >= 0"):
+            BacktestConfig(
+                symbol="005930",
+                start_date="2026-03-13",
+                end_date="2026-03-13",
+                decision_compute_ms=-5.0,
             )
 
 

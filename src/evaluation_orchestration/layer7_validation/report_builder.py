@@ -110,13 +110,6 @@ class ReportBuilder:
         plots_dir = run_dir / "plots"
         plots_dir.mkdir(exist_ok=True)
 
-        summary = result.summary()
-        # Include observation-lag diagnostics in the summary for traceability
-        if "observation_lag" in result.metadata:
-            summary["observation_lag"] = result.metadata["observation_lag"]
-        with open(run_dir / "summary.json", "w", encoding="utf-8") as fh:
-            json.dump(summary, fh, indent=2, default=str)
-
         with open(run_dir / "config.json", "w", encoding="utf-8") as fh:
             json.dump(result.config.to_dict(), fh, indent=2)
 
@@ -138,7 +131,33 @@ class ReportBuilder:
             self._save_market_quotes(states, run_dir)
 
         self._generate_plots(run_dir)
+        self._write_runtime_artifacts(result, run_dir)
         logger.info("Results saved to %s", run_dir)
+
+    def save_runtime_artifacts(
+        self,
+        result: BacktestResult,
+        output_dir: Path,
+    ) -> None:
+        """Rewrite runtime JSON artifacts after metadata updates."""
+        output_dir = Path(output_dir)
+        run_dir = output_dir / result.run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        self._write_runtime_artifacts(result, run_dir)
+
+    
+    
+    @staticmethod
+    def _write_runtime_artifacts(result: BacktestResult, run_dir: Path) -> None:
+        """Write compact summary and realism diagnostics JSON artifacts."""
+        summary = result.summary()
+        with open(run_dir / "summary.json", "w", encoding="utf-8") as fh:
+            json.dump(summary, fh, indent=2, default=str)
+
+        diagnostics = result.metadata.get("realism_diagnostics")
+        if isinstance(diagnostics, dict):
+            with open(run_dir / "realism_diagnostics.json", "w", encoding="utf-8") as fh:
+                json.dump(diagnostics, fh, indent=2, default=str)
 
     # ------------------------------------------------------------------
     # Strategy artifact persistence

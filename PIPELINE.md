@@ -169,20 +169,29 @@ PnL 계산, execution quality, 단일/Universe 백테스트, worker orchestratio
 ```
 CompiledStrategy + MarketState[]
   ↓  PipelineRunner.run()
-  ↓  observed_state = lookup(market_data_delay_ms)  ← strategy decisions
+  ↓  observed_state = lookup(market_data_delay_ms + decision_compute_ms)  ← strategy decisions
   ↓  true_state = current state                      ← fill/matching
   ↓  FillSimulator (queue gate → MatchingEngine → impact/fee)
   ↓  Bookkeeper → PnLLedger → Reports
 BacktestResult (summary JSON + artifacts)
 ```
 
-`market_data_delay_ms` (default 0.0) controls observation lag: the strategy
-sees a historical market snapshot while fills execute against the current LOB.
+`market_data_delay_ms` (default 0.0) controls observation lag (what state is seen).
+`decision_compute_ms` (default 0.0) controls strategy-side compute delay (how long it takes to act).
+Decision path uses effective delayed lookup (`market_data_delay_ms + decision_compute_ms`),
+while fills continue to execute against `true_state`.
+Venue latency semantics remain separate from decision-path lag:
+- `latency.order_submit_ms`: order becomes venue-live only after arrival
+- `latency.cancel_ms`: cancel becomes effective only after cancel-effective time
+- `latency.order_ack_ms`: reporting/status aggregate only (not fill gating in current phase)
+- replace path: intentional minimal exception (immediate cancel old child + create new child with fresh submit lifecycle); staged replace venue workflow is deferred
+
+Flat `latency_ms` is a legacy compatibility alias only. It is applied only when nested `latency` is absent (`latency is None`) as `submit/ack/cancel = 0.3/0.7/0.2 × latency_ms`, and it never derives `market_data_delay_ms`.
 Supported resample resolutions: `1s` (default baseline), `500ms` (realism-oriented).
 At `500ms`, moderate lag (≥ 200ms) yields distinct `observed_state`; at `1s`,
 small sub-second lag often collapses to the same state.
-Result metadata exposes `configured_market_data_delay_ms`, `resample_interval`,
-and `avg_observation_staleness_ms` for traceability.
+Result metadata exposes `configured_market_data_delay_ms`, `configured_decision_compute_ms`,
+`effective_delay_ms`, `avg_observation_staleness_ms`, bounded history diagnostics, and latency lifecycle diagnostics for traceability.
 Queue models are explicit interfaces in `queue_models/` (6 models, gate-only or gate+allocation).
 
 ### 5-2. Universe 백테스트 (다종목 × 다 latency)

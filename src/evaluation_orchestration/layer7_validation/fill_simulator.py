@@ -9,7 +9,7 @@ and recording fills into the bookkeeper and PnL ledger.
 **Queue-position semantics are owned exclusively by this module.**
 For passive resting orders, FillSimulator:
   1. Determines passive-queue candidacy  (_is_passive_queue_candidate)
-  2. Initializes queue state             (_initialize_queue_state)
+  2. Initializes queue state (_initialize_queue_state)
   3. Advances queue_ahead_qty each tick  (_advance_queue_and_ready)
   4. Gates the order: only forwards it to MatchingEngine once the
      queue has been consumed (queue_ahead_qty <= 0).
@@ -44,6 +44,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import numpy as np
+import pandas as pd
 
 from evaluation_orchestration.layer7_validation.queue_models import build_queue_model, QueueModel
 
@@ -96,6 +97,28 @@ class FillSimulator:
         self._queue_model = (queue_model or "prob_queue").strip().lower()
         self._queue_position_assumption = float(np.clip(queue_position_assumption, 0.0, 1.0))
         self._rng = np.random.default_rng(rng_seed)
+        # Lightweight queue diagnostics (always-on aggregate only).
+        self._queue_blocked_count: int = 0
+        self._queue_ready_count: int = 0
+        self._queue_blocked_miss_count: int = 0
+        self._queue_ready_but_not_filled_count: int = 0
+        self._queue_wait_ticks_sum: float = 0.0
+        self._queue_wait_ms_sum: float = 0.0
+        self._queue_wait_samples: int = 0
+
+        self._submit_latency_sum_ms: float = 0.0
+        self._submit_latency_count: int = 0
+        self._ack_latency_sum_ms: float = 0.0
+        self._ack_latency_count: int = 0
+        self._cancel_latency_sum_ms: float = 0.0
+        self._cancel_latency_count: int = 0
+        self._cancel_pending_count: int = 0
+        self._cancel_effective_lag_sum_ms: float = 0.0
+        self._cancel_effective_lag_count: int = 0
+        self._fill_latency_sum_ms: float = 0.0
+        self._fill_latency_count: int = 0
+        self._pending_before_arrival_count: int = 0
+        self._fills_before_cancel_effective_count: int = 0
 
         # Build explicit queue model interface
         self._queue_model_impl: QueueModel = build_queue_model(
@@ -103,6 +126,128 @@ class FillSimulator:
             queue_position_assumption=self._queue_position_assumption,
             rng_seed=rng_seed,
         )
+    @staticmethod
+    def _as_timestamp(value) -> pd.Timestamp | None:
+        if isinstance(value, pd.Timestamp):
+            return value
+        return None
+
+    def _clear_cancel_pending(self, child) -> None:
+        if not isinstance(child.meta, dict):
+            return
+        if bool(child.meta.get("cancel_pending", False)):
+            child.meta["cancel_pending"] = False
+            self._cancel_pending_count = max(0, self._cancel_pending_count - 1)
+
+    def _record_queue_wait(self, child, state: "MarketState") -> None:
+        if not isinstance(child.meta, dict):
+            return
+        enter_ts = self._as_timestamp(child.meta.get("queue_enter_ts"))
+        if enter_ts is None:
+            enter_ts = self._as_timestamp(getattr(child, "queue_enter_ts", None))
+        if enter_ts is None:
+            return
+
+        wait_ms = max(0.0, (state.timestamp - enter_ts).total_seconds() * 1000.0)
+        tick_ms = float(child.meta.get("canonical_tick_interval_ms", 0.0))
+        wait_ticks = (wait_ms / tick_ms) if tick_ms > 0.0 else 0.0
+
+        self._queue_wait_ms_sum += float(wait_ms)
+        self._queue_wait_ticks_sum += float(wait_ticks)
+        self._queue_wait_samples += 1
+
+    def register_submit_request(self, child, request_time: pd.Timestamp) -> None:
+        if not isinstance(child.meta, dict):
+            child.meta = {}
+        if self._as_timestamp(child.meta.get("venue_arrival_time")) is not None:
+            return
+
+        submit_ms, ack_ms = self._latency_model.sample_submit_and_ack_latency()
+        venue_arrival_time = request_time + pd.Timedelta(milliseconds=submit_ms)
+        ack_time = venue_arrival_time + pd.Timedelta(milliseconds=ack_ms)
+
+        child.meta["submit_request_time"] = request_time
+        child.meta["submit_latency_ms"] = float(submit_ms)
+        child.meta["venue_arrival_time"] = venue_arrival_time
+        child.meta["ack_latency_ms"] = float(ack_ms)
+        child.meta["ack_time"] = ack_time
+
+        self._submit_latency_sum_ms += float(submit_ms)
+        self._submit_latency_count += 1
+        self._ack_latency_sum_ms += float(ack_ms)
+        self._ack_latency_count += 1
+
+    def register_cancel_request(self, child, request_time: pd.Timestamp, reason: str) -> None:
+        if not isinstance(child.meta, dict):
+            child.meta = {}
+        if bool(child.meta.get("cancel_pending", False)):
+            return
+
+        cancel_ms = self._latency_model.sample_cancel_latency()
+        cancel_effective_time = request_time + pd.Timedelta(milliseconds=cancel_ms)
+
+        child.meta["cancel_pending"] = True
+        self._cancel_pending_count += 1
+        child.meta["cancel_request_reason"] = reason
+        child.meta["cancel_requested_time"] = request_time
+        child.meta["cancel_latency_ms"] = float(cancel_ms)
+        child.meta["cancel_effective_time"] = cancel_effective_time
+
+        self._cancel_latency_sum_ms += float(cancel_ms)
+        self._cancel_latency_count += 1
+
+    def finalize_cancel_if_due(self, child, current_time: pd.Timestamp) -> bool:
+        from execution_planning.layer3_order.order_types import OrderStatus
+
+        if not isinstance(child.meta, dict):
+            return False
+        if not bool(child.meta.get("cancel_pending", False)):
+            return False
+
+        effective_time = self._as_timestamp(child.meta.get("cancel_effective_time"))
+        if effective_time is None or current_time < effective_time:
+            return False
+
+        requested_time = self._as_timestamp(child.meta.get("cancel_requested_time"))
+        if requested_time is not None:
+            lag_ms = max(0.0, (current_time - requested_time).total_seconds() * 1000.0)
+            self._cancel_effective_lag_sum_ms += float(lag_ms)
+            self._cancel_effective_lag_count += 1
+
+        self._clear_cancel_pending(child)
+        if child.remaining_qty <= 0:
+            return False
+
+        child.status = OrderStatus.CANCELLED
+        child.cancel_time = current_time
+        child.meta["cancel_reason"] = str(child.meta.get("cancel_request_reason", "cancel_requested"))
+        return True
+
+    def latency_diagnostics(self) -> dict[str, float | int]:
+        submit_avg = (self._submit_latency_sum_ms / self._submit_latency_count) if self._submit_latency_count > 0 else 0.0
+        ack_avg = (self._ack_latency_sum_ms / self._ack_latency_count) if self._ack_latency_count > 0 else 0.0
+        cancel_avg = (self._cancel_latency_sum_ms / self._cancel_latency_count) if self._cancel_latency_count > 0 else 0.0
+        fill_avg = (self._fill_latency_sum_ms / self._fill_latency_count) if self._fill_latency_count > 0 else 0.0
+        cancel_effective_avg = (self._cancel_effective_lag_sum_ms / self._cancel_effective_lag_count) if self._cancel_effective_lag_count > 0 else 0.0
+
+        return {
+            "configured_order_submit_ms": float(self._latency_model.profile.order_submit_ms),
+            "configured_order_ack_ms": float(self._latency_model.profile.order_ack_ms),
+            "configured_cancel_ms": float(self._latency_model.profile.cancel_ms),
+            "sampled_avg_submit_latency_ms": float(submit_avg),
+            "sampled_avg_ack_latency_ms": float(ack_avg),
+            "sampled_avg_cancel_latency_ms": float(cancel_avg),
+            "avg_cancel_effective_lag_ms": float(cancel_effective_avg),
+            "sampled_avg_fill_latency_ms": float(fill_avg),
+            "sampled_submit_latency_count": int(self._submit_latency_count),
+            "sampled_ack_latency_count": int(self._ack_latency_count),
+            "sampled_cancel_latency_count": int(self._cancel_latency_count),
+            "cancel_effective_samples_count": int(self._cancel_effective_lag_count),
+            "cancel_pending_count": int(self._cancel_pending_count),
+            "sampled_fill_latency_count": int(self._fill_latency_count),
+            "pending_before_arrival_count": int(self._pending_before_arrival_count),
+            "fills_before_cancel_effective_count": int(self._fills_before_cancel_effective_count),
+        }
 
     def simulate_fills(
         self,
@@ -125,26 +270,58 @@ class FillSimulator:
         for child in child_orders:
             # Parent-level overfill guard: stop filling once parent is complete
             if parent.remaining_qty <= 0:
+                self._clear_cancel_pending(child)
                 child.status = OrderStatus.CANCELLED
                 continue
 
+            if self._as_timestamp(child.meta.get("venue_arrival_time")) is None:
+                self.register_submit_request(child, state.timestamp)
+
+            if self.finalize_cancel_if_due(child, state.timestamp):
+                continue
+
+            venue_arrival_time = self._as_timestamp(child.meta.get("venue_arrival_time"))
+            if venue_arrival_time is not None and state.timestamp < venue_arrival_time:
+                tick_ms = float(child.meta.get("canonical_tick_interval_ms", 0.0)) if isinstance(child.meta, dict) else 0.0
+                ms_until_arrival = (venue_arrival_time - state.timestamp).total_seconds() * 1000.0
+                if tick_ms <= 0.0 or ms_until_arrival >= tick_ms:
+                    self._pending_before_arrival_count += 1
+                    child.status = OrderStatus.PENDING
+                    continue
+
+            if child.status == OrderStatus.PENDING:
+                child.status = OrderStatus.OPEN
+
             remaining_qty = child.remaining_qty
             if remaining_qty <= 0:
+                self._clear_cancel_pending(child)
                 child.status = OrderStatus.FILLED
                 continue
+
+            queue_ready_this_tick = False
 
             # Passive queue-position gate: non-marketable passive orders must first
             # burn through ahead queue before matching can occur.
             if self._is_queue_gate_enabled() and self._is_passive_queue_candidate(child, state):
                 self._initialize_queue_state(child, state)
                 if not self._advance_queue_and_ready(child, state):
+                    self._queue_blocked_count += 1
+                    self._queue_blocked_miss_count += 1
                     child.status = OrderStatus.OPEN
                     continue
+
+                queue_ready_this_tick = True
+                if not bool(child.meta.get("queue_ready_recorded", False)):
+                    self._queue_ready_count += 1
+                    self._record_queue_wait(child, state)
+                    child.meta["queue_ready_recorded"] = True
 
             # Cap child fill to parent remaining to prevent overfill
             remaining_qty = min(remaining_qty, parent.remaining_qty)
 
-            latency_ms = self._latency_model.total_round_trip_ms()
+            submit_latency_ms = float(child.meta.get("submit_latency_ms", 0.0))
+            ack_latency_ms = float(child.meta.get("ack_latency_ms", 0.0))
+            latency_ms = submit_latency_ms + ack_latency_ms
             filled_qty, matched_price = self._matching_engine.match(
                 child=replace(child, qty=remaining_qty, filled_qty=0),
                 book=self._order_book,
@@ -153,7 +330,11 @@ class FillSimulator:
             )
 
             if filled_qty <= 0:
+                if queue_ready_this_tick:
+                    self._queue_ready_but_not_filled_count += 1
                 child.status = OrderStatus.CANCELLED if child.tif.name == "IOC" else OrderStatus.OPEN
+                if child.status == OrderStatus.CANCELLED:
+                    self._clear_cancel_pending(child)
                 continue
 
             # Post-gate allocation cap (e.g. pro_rata)
@@ -201,6 +382,11 @@ class FillSimulator:
                 latency_ms=latency_ms,
             )
             fills.append(fill)
+            self._fill_latency_sum_ms += float(latency_ms)
+            self._fill_latency_count += 1
+            cancel_effective_time = self._as_timestamp(child.meta.get("cancel_effective_time"))
+            if bool(child.meta.get("cancel_pending", False)) and cancel_effective_time is not None and state.timestamp < cancel_effective_time:
+                self._fills_before_cancel_effective_count += 1
 
             existing_child_qty = child.filled_qty
             child.filled_qty += filled_qty
@@ -208,7 +394,11 @@ class FillSimulator:
                 child.avg_fill_price, existing_child_qty, impacted_price, filled_qty,
             )
             child.fill_time = state.timestamp
-            child.status = OrderStatus.FILLED if child.is_complete else OrderStatus.PARTIAL
+            if child.is_complete:
+                self._clear_cancel_pending(child)
+                child.status = OrderStatus.FILLED
+            else:
+                child.status = OrderStatus.PARTIAL
 
             existing_parent_qty = parent.filled_qty
             parent.filled_qty += filled_qty
@@ -233,6 +423,23 @@ class FillSimulator:
             self._bookkeeper.record_fill(fill)
             self._pnl_ledger.record_fill(fill, cost_basis=cost_basis, mark_price=mid)
             all_fills.append(fill)
+
+    def queue_diagnostics(self) -> dict[str, float | str]:
+        """Return lightweight queue diagnostics for reporting."""
+        wait_ticks = (self._queue_wait_ticks_sum / self._queue_wait_samples) if self._queue_wait_samples > 0 else 0.0
+        wait_ms = (self._queue_wait_ms_sum / self._queue_wait_samples) if self._queue_wait_samples > 0 else 0.0
+
+        return {
+            "queue_model": self._queue_model,
+            "queue_position_assumption": self._queue_position_assumption,
+            "queue_blocked_count": float(self._queue_blocked_count),
+            "queue_ready_count": float(self._queue_ready_count),
+            "queue_wait_ticks": float(wait_ticks),
+            "queue_wait_ms": float(wait_ms),
+            "blocked_miss_count": float(self._queue_blocked_miss_count),
+            "ready_but_not_filled_count": float(self._queue_ready_but_not_filled_count),
+            "queue_wait_samples_count": float(self._queue_wait_samples),
+        }
 
     def _is_queue_gate_enabled(self) -> bool:
         return self._queue_model != "none"
@@ -282,6 +489,7 @@ class FillSimulator:
         child.meta["queue_initialized"] = True
         child.meta["queue_ahead_qty"] = child.queue_ahead_qty
         child.meta["queue_model"] = self._queue_model
+        child.meta.setdefault("queue_ready_recorded", False)
 
     def _advance_queue_and_ready(self, child, state: "MarketState") -> bool:
         """Advance queue_ahead_qty and return True if the order is ready to fill.

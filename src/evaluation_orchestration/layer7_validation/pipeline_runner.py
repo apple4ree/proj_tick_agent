@@ -15,9 +15,11 @@ Report generation logic lives in report_builder.py.
 from __future__ import annotations
 
 import bisect
+from collections import Counter
 import logging
+import math
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
@@ -46,6 +48,9 @@ class PipelineRunner:
     output_dir : str | Path | None
     strategy : Strategy | None
     """
+
+    _HISTORY_MIN_LEN = 20
+    _HISTORY_SAFETY_TICKS = 10
 
     def __init__(
         self,
@@ -90,12 +95,27 @@ class PipelineRunner:
         self._state_history: dict[str, list["MarketState"]] = {}
         self._state_ts: dict[str, list[pd.Timestamp]] = {}
         self._market_data_delay_ms: float = 0.0
+        # Decision latency (Phase 2 realism): strategy compute time (ms).
+        # Combined with observation lag for effective state lookup delay.
+        self._decision_compute_ms: float = 0.0
         # Observation staleness accumulator (for reporting)
         self._staleness_sum_ms: float = 0.0
         self._staleness_count: int = 0
+        self._staleness_max_ms: float = 0.0
+        # Decision-evaluated state-age accumulator (actual decision steps only).
+        self._decision_age_sum_ms: float = 0.0
+        self._decision_age_count: int = 0
+        self._decision_age_max_ms: float = 0.0
         # Canonical tick interval (ms): resample step duration.
         # Updated in run() from state metadata; default 1000.0 (1s).
         self._canonical_tick_ms: float = 1000.0
+        # Bounded state-history retention: maximum number of states to keep
+        # per symbol.  Computed in run() from delay settings and tick interval.
+        # 0 = unbounded (only when no delay is configured).
+        self._max_history_len: int = 0
+        # Strategy/runtime lookback requirement inferred from LagExpr /
+        # RollingExpr / PersistExpr in compiled v2 specs.
+        self._strategy_lookback_ticks: int = 0
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -119,6 +139,238 @@ class PipelineRunner:
             return 500.0
         # Default / "1s" / unrecognised → 1 second
         return 1000.0
+
+    def _effective_decision_delay_ms(self) -> float:
+        """Return effective decision-path stale-state delay in milliseconds."""
+        return max(0.0, float(self._market_data_delay_ms)) + max(0.0, float(self._decision_compute_ms))
+
+    def _iter_strategy_expr_roots(self) -> list[Any]:
+        """Collect expression roots from a compiled v2 strategy spec.
+
+        Returns an empty list when strategy/spec metadata is unavailable.
+        """
+        strategy = self._strategy
+        spec = getattr(strategy, "_spec", None) if strategy is not None else None
+        if spec is None:
+            return []
+
+        roots: list[Any] = []
+
+        def _add(node: Any) -> None:
+            if node is not None:
+                roots.append(node)
+
+        for pc in getattr(spec, "preconditions", []) or []:
+            _add(getattr(pc, "condition", None))
+        for ep in getattr(spec, "entry_policies", []) or []:
+            _add(getattr(ep, "trigger", None))
+            _add(getattr(ep, "strength", None))
+        for xp in getattr(spec, "exit_policies", []) or []:
+            for rule in getattr(xp, "rules", []) or []:
+                _add(getattr(rule, "condition", None))
+
+        risk_policy = getattr(spec, "risk_policy", None)
+        if risk_policy is not None:
+            for rr in getattr(risk_policy, "degradation_rules", []) or []:
+                _add(getattr(rr, "condition", None))
+
+        execution_policy = getattr(spec, "execution_policy", None)
+        if execution_policy is not None:
+            _add(getattr(execution_policy, "do_not_trade_when", None))
+            for ar in getattr(execution_policy, "adaptation_rules", []) or []:
+                _add(getattr(ar, "condition", None))
+
+        for regime in getattr(spec, "regimes", []) or []:
+            _add(getattr(regime, "when", None))
+            regime_risk = getattr(regime, "risk_override", None)
+            if regime_risk is not None:
+                for rr in getattr(regime_risk, "degradation_rules", []) or []:
+                    _add(getattr(rr, "condition", None))
+            regime_exec = getattr(regime, "execution_override", None)
+            if regime_exec is not None:
+                _add(getattr(regime_exec, "do_not_trade_when", None))
+                for ar in getattr(regime_exec, "adaptation_rules", []) or []:
+                    _add(getattr(ar, "condition", None))
+
+        state_policy = getattr(spec, "state_policy", None)
+        if state_policy is not None:
+            for guard in getattr(state_policy, "guards", []) or []:
+                _add(getattr(guard, "condition", None))
+
+        return roots
+
+    def _expr_required_lookback_ticks(self, node: Any, visited: set[int] | None = None) -> int:
+        """Conservative lookback in ticks required by a single expression tree."""
+        if node is None:
+            return 0
+
+        if visited is None:
+            visited = set()
+        node_id = id(node)
+        if node_id in visited:
+            return 0
+        visited.add(node_id)
+
+        node_type = getattr(node, "type", "")
+        max_ticks = 0
+        if node_type == "lag":
+            max_ticks = max(max_ticks, max(0, int(getattr(node, "steps", 0) or 0)))
+        elif node_type == "rolling":
+            max_ticks = max(max_ticks, max(0, int(getattr(node, "window", 0) or 0)))
+        elif node_type == "persist":
+            max_ticks = max(max_ticks, max(0, int(getattr(node, "window", 0) or 0)))
+        elif node_type == "cross":
+            max_ticks = max(max_ticks, 1)
+
+        for attr_name in ("expr", "left", "child"):
+            child = getattr(node, attr_name, None)
+            if child is not None:
+                max_ticks = max(max_ticks, self._expr_required_lookback_ticks(child, visited))
+
+        children = getattr(node, "children", None)
+        if isinstance(children, list):
+            for child in children:
+                max_ticks = max(max_ticks, self._expr_required_lookback_ticks(child, visited))
+
+        return max_ticks
+
+    def _strategy_runtime_lookback_ticks(self) -> int:
+        """Infer strategy/runtime lookback depth from compiled v2 expressions."""
+        max_ticks = 0
+        for node in self._iter_strategy_expr_roots():
+            max_ticks = max(max_ticks, self._expr_required_lookback_ticks(node))
+        return max_ticks
+
+    def _compute_history_retention_len(self) -> int:
+        """Compute bounded state-history length for observed-state lookup."""
+        tick_ms = self._canonical_tick_ms if self._canonical_tick_ms > 0.0 else 1000.0
+        delay_ticks = int(math.ceil(self._effective_decision_delay_ms() / tick_ms)) + 1
+        self._strategy_lookback_ticks = self._strategy_runtime_lookback_ticks()
+        required = delay_ticks + self._strategy_lookback_ticks + self._HISTORY_SAFETY_TICKS
+        return max(required, self._HISTORY_MIN_LEN)
+
+    def _annotate_decision_metadata(
+        self,
+        meta: dict[str, Any],
+        *,
+        true_state: "MarketState",
+        observed_state: "MarketState",
+        phase: str,
+    ) -> None:
+        """Stamp decision-time context into order metadata."""
+        state_age_ms = (true_state.timestamp - observed_state.timestamp).total_seconds() * 1000.0
+        meta["decision_phase"] = phase
+        meta["configured_market_data_delay_ms"] = float(getattr(self, "_market_data_delay_ms", 0.0))
+        meta["configured_decision_compute_ms"] = float(getattr(self, "_decision_compute_ms", 0.0))
+        meta["decision_latency_enabled"] = bool(getattr(self, "_decision_compute_ms", 0.0) > 0.0)
+        meta["effective_delay_ms"] = self._effective_decision_delay_ms()
+        meta["decision_true_ts"] = true_state.timestamp
+        meta["decision_observed_ts"] = observed_state.timestamp
+        meta["decision_state_age_ms"] = state_age_ms
+
+        self._decision_age_sum_ms += float(state_age_ms)
+        self._decision_age_count += 1
+        self._decision_age_max_ms = max(self._decision_age_max_ms, float(state_age_ms))
+
+    
+    
+    
+    
+    @staticmethod
+    def _cancel_reason_bucket(reason: str | None) -> str:
+        raw = (reason or "").strip().lower()
+        if not raw:
+            return "unknown"
+        if "micro_event_block" in raw:
+            return "micro_event_block"
+        if "max_reprices_reached" in raw:
+            return "max_reprices_reached"
+        if "adverse_selection" in raw:
+            return "adverse_selection"
+        if "timeout" in raw:
+            return "timeout"
+        if "stale_price" in raw or "price_very_stale" in raw:
+            return "stale_price"
+        return "unknown"
+
+    def _aggregate_cancel_reasons(self, parent_orders: list["ParentOrder"]) -> dict[str, dict[str, float]]:
+        buckets = (
+            "timeout",
+            "adverse_selection",
+            "stale_price",
+            "max_reprices_reached",
+            "micro_event_block",
+            "unknown",
+        )
+        counts = Counter({k: 0 for k in buckets})
+        for parent in parent_orders:
+            for child in parent.child_orders:
+                if child.status.name != "CANCELLED":
+                    continue
+                reason = child.meta.get("cancel_reason") if isinstance(child.meta, dict) else None
+                counts[self._cancel_reason_bucket(reason)] += 1
+
+        total = sum(counts.values())
+        shares = {k: (float(counts[k]) / float(total) if total > 0 else 0.0) for k in buckets}
+        return {
+            "counts": {k: float(counts[k]) for k in buckets},
+            "shares": shares,
+        }
+
+    def _aggregate_lifecycle(
+        self,
+        parent_orders: list["ParentOrder"],
+        signals: list,
+        fills: list["FillEvent"],
+    ) -> dict[str, float | str | None]:
+        child_orders = [child for parent in parent_orders for child in parent.child_orders]
+
+        lifetime_seconds: list[float] = []
+        for child in child_orders:
+            start_ts = child.submit_time or child.submitted_time
+            end_ts = child.fill_time or child.cancel_time
+            if start_ts is None or end_ts is None:
+                continue
+            dt = (end_ts - start_ts).total_seconds()
+            if dt >= 0.0:
+                lifetime_seconds.append(float(dt))
+
+        parent_count = len(parent_orders)
+        child_count = len(child_orders)
+        fill_count = len(fills)
+        avg_child_lifetime = (
+            float(sum(lifetime_seconds) / len(lifetime_seconds))
+            if lifetime_seconds else 0.0
+        )
+
+        max_children_per_parent = 0
+        max_cancelled_children_per_parent = 0
+        top_parent_by_children: str | None = None
+        top_parent_by_cancelled: str | None = None
+
+        for parent in parent_orders:
+            n_children = len(parent.child_orders)
+            n_cancelled = sum(1 for child in parent.child_orders if child.status.name == "CANCELLED")
+            if n_children > max_children_per_parent:
+                max_children_per_parent = n_children
+                top_parent_by_children = str(parent.order_id)
+            if n_cancelled > max_cancelled_children_per_parent:
+                max_cancelled_children_per_parent = n_cancelled
+                top_parent_by_cancelled = str(parent.order_id)
+
+        return {
+            "signal_count": float(len(signals)),
+            "parent_order_count": float(parent_count),
+            "child_order_count": float(child_count),
+            "n_fills": float(fill_count),
+            "avg_child_lifetime_seconds": avg_child_lifetime,
+            "children_per_parent": (float(child_count) / float(parent_count) if parent_count > 0 else 0.0),
+            "fills_per_parent": (float(fill_count) / float(parent_count) if parent_count > 0 else 0.0),
+            "max_children_per_parent": float(max_children_per_parent),
+            "max_cancelled_children_per_parent": float(max_cancelled_children_per_parent),
+            "top_parent_by_children": top_parent_by_children,
+            "top_parent_by_cancelled_children": top_parent_by_cancelled,
+        }
 
     def run(self, states: list["MarketState"]) -> BacktestResult:
         """Execute the full backtest pipeline over a sequence of market states."""
@@ -156,8 +408,19 @@ class PipelineRunner:
         self._state_history.clear()
         self._state_ts.clear()
         self._market_data_delay_ms = self.config.market_data_delay_ms
+        self._decision_compute_ms = getattr(self.config, "decision_compute_ms", 0.0)
         self._staleness_sum_ms = 0.0
         self._staleness_count = 0
+        self._staleness_max_ms = 0.0
+        self._decision_age_sum_ms = 0.0
+        self._decision_age_count = 0
+        self._decision_age_max_ms = 0.0
+        self._strategy_lookback_ticks = 0
+
+        # Bounded state-history retention: effective delay + strategy runtime
+        # lookback (LagExpr/RollingExpr/PersistExpr) + safety buffer.
+        effective_delay_ms = self._effective_decision_delay_ms()
+        self._max_history_len = self._compute_history_retention_len()
 
         # Running TWAP accumulators — O(1) per step instead of O(n)
         _twap_sum: dict[str, float] = {}
@@ -177,7 +440,7 @@ class PipelineRunner:
             # Accumulate history BEFORE lookup so the current state is available
             self._accumulate_state(true_state)
             observed_state = self._lookup_observed_state(
-                symbol, true_state.timestamp, self._market_data_delay_ms,
+                symbol, true_state.timestamp, effective_delay_ms,
             )
 
             # Track actual observation staleness for reporting
@@ -185,6 +448,7 @@ class PipelineRunner:
                 staleness_ms = (true_state.timestamp - observed_state.timestamp).total_seconds() * 1000.0
                 self._staleness_sum_ms += staleness_ms
                 self._staleness_count += 1
+                self._staleness_max_ms = max(self._staleness_max_ms, staleness_ms)
 
             prev_state = self._prev_state_by_symbol.get(symbol)
             events = self._process_micro_events(prev_state, true_state)
@@ -227,7 +491,7 @@ class PipelineRunner:
                     all_signals.append(signal)
                     target_delta = self._compute_target_delta(signal, observed_state)
                     if target_delta != 0:
-                        parent = self._create_parent_order(signal, target_delta, observed_state)
+                        parent = self._create_parent_order(signal, target_delta, observed_state, true_state)
                         if parent is not None:
                             arrival_prices[symbol] = mid
                             all_parent_orders.append(parent)
@@ -235,7 +499,7 @@ class PipelineRunner:
 
             if parent is not None and self._parent_can_submit(parent):
                 # Slicing uses observed state for pricing; fills use true state
-                child_orders = self._slice_order(parent, observed_state)
+                child_orders = self._slice_order(parent, observed_state, true_state)
                 fills = self._fill_simulator.simulate_fills(parent, child_orders, true_state)
                 self._sync_open_children(symbol, parent)
                 self._fill_simulator.record_fills(fills, mid, all_fills)
@@ -269,6 +533,156 @@ class PipelineRunner:
         )
         t_report = _time.monotonic() - t_report_0
 
+        base_timings = {
+            "setup_s": round(t_setup, 3),
+            "loop_s": round(t_loop, 3),
+            "report_s": round(t_report, 3),
+            "save_s": 0.0,
+            "total_s": round(t_setup + t_loop + t_report, 3),
+        }
+        result.metadata["timings"] = dict(base_timings)
+
+        avg_staleness_ms = (
+            round(self._staleness_sum_ms / self._staleness_count, 3)
+            if self._staleness_count > 0 else 0.0
+        )
+        max_staleness_ms = round(self._staleness_max_ms, 3) if self._staleness_count > 0 else 0.0
+        staleness_samples = int(self._staleness_count)
+        avg_decision_age_ms = (
+            round(self._decision_age_sum_ms / self._decision_age_count, 3)
+            if self._decision_age_count > 0 else 0.0
+        )
+        max_decision_age_ms = round(self._decision_age_max_ms, 3) if self._decision_age_count > 0 else 0.0
+        decision_state_samples = int(self._decision_age_count)
+        resample_interval = states[0].meta.get("resample_freq") if states else None
+
+        observation_lag = {
+            "configured_market_data_delay_ms": float(self._market_data_delay_ms),
+            "avg_observation_staleness_ms": avg_staleness_ms,
+            "max_observation_staleness_ms": max_staleness_ms,
+            "staleness_samples_count": staleness_samples,
+            "effective_delay_ms": float(effective_delay_ms),
+            "resample_interval": resample_interval,
+            "canonical_tick_interval_ms": float(self._canonical_tick_ms),
+            "configured_decision_compute_ms": float(self._decision_compute_ms),
+            "decision_latency_enabled": bool(self._decision_compute_ms > 0.0),
+            "avg_decision_state_age_ms": avg_decision_age_ms,
+            "decision_state_samples_count": decision_state_samples,
+            "state_history_max_len": int(self._max_history_len),
+            "strategy_runtime_lookback_ticks": int(self._strategy_lookback_ticks),
+            "history_safety_buffer_ticks": int(self._HISTORY_SAFETY_TICKS),
+        }
+        result.metadata["observation_lag"] = observation_lag
+
+        lifecycle = self._aggregate_lifecycle(all_parent_orders, all_signals, all_fills)
+        lifecycle["cancel_rate"] = float(result.execution_report.cancel_rate)
+        lifecycle["avg_holding_seconds"] = float(result.turnover_report.avg_holding_period) * (self._canonical_tick_ms / 1000.0)
+
+        queue_diag = (
+            self._fill_simulator.queue_diagnostics()
+            if self._fill_simulator is not None and hasattr(self._fill_simulator, "queue_diagnostics")
+            else {}
+        )
+        latency_diag = (
+            self._fill_simulator.latency_diagnostics()
+            if self._fill_simulator is not None and hasattr(self._fill_simulator, "latency_diagnostics")
+            else {}
+        )
+
+        queue_model_cfg = self.config.exchange.queue_model if self.config.exchange is not None else self.config.queue_model
+        queue_pos_cfg = (
+            self.config.exchange.queue_position_assumption
+            if self.config.exchange is not None
+            else self.config.queue_position_assumption
+        )
+        queue_section: dict[str, float | str] = {
+            "queue_model": str(queue_diag.get("queue_model", queue_model_cfg)),
+            "queue_position_assumption": float(queue_diag.get("queue_position_assumption", queue_pos_cfg)),
+            "maker_fill_ratio": float(result.execution_report.maker_fill_ratio),
+        }
+        for key in ("queue_blocked_count", "queue_ready_count", "queue_wait_ticks", "queue_wait_ms", "blocked_miss_count", "ready_but_not_filled_count", "queue_wait_samples_count"):
+            if key in queue_diag:
+                queue_section[key] = float(queue_diag[key])
+
+        latency_cfg = self.config.latency
+        configured_submit_ms = latency_diag.get("configured_order_submit_ms")
+        configured_ack_ms = latency_diag.get("configured_order_ack_ms")
+        configured_cancel_ms = latency_diag.get("configured_cancel_ms")
+        if configured_submit_ms is None:
+            configured_submit_ms = latency_cfg.order_submit_ms if latency_cfg and latency_cfg.order_submit_ms is not None else 0.0
+        if configured_ack_ms is None:
+            configured_ack_ms = latency_cfg.order_ack_ms if latency_cfg and latency_cfg.order_ack_ms is not None else 0.0
+        if configured_cancel_ms is None:
+            configured_cancel_ms = latency_cfg.cancel_ms if latency_cfg and latency_cfg.cancel_ms is not None else 0.0
+
+        latency_section: dict[str, float | int | bool] = {
+            "configured_order_submit_ms": float(configured_submit_ms),
+            "configured_order_ack_ms": float(configured_ack_ms),
+            "configured_cancel_ms": float(configured_cancel_ms),
+            "latency_alias_applied": bool(getattr(self.config, "_latency_alias_applied", False)),
+            "order_ack_used_for_fill_gating": False,
+        }
+        for key in ("sampled_avg_submit_latency_ms", "sampled_avg_ack_latency_ms", "sampled_avg_cancel_latency_ms", "avg_cancel_effective_lag_ms", "sampled_avg_fill_latency_ms"):
+            if key in latency_diag:
+                latency_section[key] = float(latency_diag[key])
+        for key in ("sampled_submit_latency_count", "sampled_ack_latency_count", "sampled_cancel_latency_count", "cancel_effective_samples_count", "cancel_pending_count", "sampled_fill_latency_count", "pending_before_arrival_count", "fills_before_cancel_effective_count"):
+            if key in latency_diag:
+                latency_section[key] = int(latency_diag[key])
+
+        cancel_reasons = self._aggregate_cancel_reasons(all_parent_orders)
+
+        decision_latency = {
+            "configured_decision_compute_ms": float(self._decision_compute_ms),
+            "decision_latency_enabled": bool(self._decision_compute_ms > 0.0),
+            "avg_decision_state_age_ms": avg_decision_age_ms,
+            "max_decision_state_age_ms": max_decision_age_ms,
+            "decision_state_samples_count": decision_state_samples,
+            "avg_decision_state_age_ms_note": "Aggregated over decision-evaluated steps only.",
+        }
+
+        tick_time = {
+            "canonical_tick_interval_ms": float(self._canonical_tick_ms),
+            "resample_interval": resample_interval,
+            "state_history_max_len": int(self._max_history_len),
+            "strategy_runtime_lookback_ticks": int(self._strategy_lookback_ticks),
+            "history_safety_buffer_ticks": int(self._HISTORY_SAFETY_TICKS),
+        }
+
+        config_snapshot = {
+            "resample": resample_interval,
+            "market_data_delay_ms": float(self._market_data_delay_ms),
+            "decision_compute_ms": float(self._decision_compute_ms),
+            "latency_ms": float(self.config.latency_ms),
+            "latency_order_submit_ms": float(latency_section["configured_order_submit_ms"]),
+            "latency_order_ack_ms": float(latency_section["configured_order_ack_ms"]),
+            "latency_cancel_ms": float(latency_section["configured_cancel_ms"]),
+            "latency_alias_applied": bool(latency_section["latency_alias_applied"]),
+            "queue_model": str(queue_section["queue_model"]),
+            "exchange_model": str(self.config.exchange_model),
+            "placement_style": str(self.config.placement_style),
+            "slicing_algo": str(self.config.slicing_algo),
+        }
+
+        realism_diagnostics = {
+            "observation_lag": dict(observation_lag),
+            "decision_latency": decision_latency,
+            "tick_time": tick_time,
+            "lifecycle": dict(lifecycle),
+            "queue": dict(queue_section),
+            "latency": dict(latency_section),
+            "cancel_reasons": cancel_reasons,
+            "timings": dict(base_timings),
+            "config_snapshot": config_snapshot,
+        }
+
+        result.metadata["decision_latency"] = decision_latency
+        result.metadata["tick_time"] = tick_time
+        result.metadata["lifecycle"] = dict(lifecycle)
+        result.metadata["queue"] = dict(queue_section)
+        result.metadata["latency"] = dict(latency_section)
+        result.metadata["cancel_reasons"] = cancel_reasons
+        result.metadata["realism_diagnostics"] = realism_diagnostics
+
         t_save_0 = _time.monotonic()
         if self.output_dir is not None:
             self._report_builder.save_results(
@@ -288,21 +702,10 @@ class PipelineRunner:
             "total_s": round(t_setup + t_loop + t_report + t_save, 3),
         }
         result.metadata["timings"] = timings
+        result.metadata["realism_diagnostics"]["timings"] = timings
 
-        # Observation-lag diagnostics
-        avg_staleness_ms = (
-            round(self._staleness_sum_ms / self._staleness_count, 3)
-            if self._staleness_count > 0 else 0.0
-        )
-        resample_freq = (
-            states[0].meta.get("resample_freq") if states else None
-        )
-        result.metadata["observation_lag"] = {
-            "configured_market_data_delay_ms": self._market_data_delay_ms,
-            "resample_interval": resample_freq,
-            "canonical_tick_interval_ms": self._canonical_tick_ms,
-            "avg_observation_staleness_ms": avg_staleness_ms,
-        }
+        if self.output_dir is not None:
+            self._report_builder.save_runtime_artifacts(result, self.output_dir)
 
         logger.info(
             "Pipeline timings: setup=%.1fs  loop=%.1fs  report=%.1fs  save=%.1fs  total=%.1fs",
@@ -401,13 +804,25 @@ class PipelineRunner:
     # ------------------------------------------------------------------
 
     def _accumulate_state(self, state: "MarketState") -> None:
-        """Append state to per-symbol history for observed_state lookup."""
+        """Append state to per-symbol history for observed_state lookup.
+
+        Prunes history beyond ``_max_history_len`` to bound memory usage,
+        especially important at finer resolutions (500ms) and in universe
+        backtests with many symbols.
+        """
         sym = state.symbol
         if sym not in self._state_history:
             self._state_history[sym] = []
             self._state_ts[sym] = []
         self._state_history[sym].append(state)
         self._state_ts[sym].append(state.timestamp)
+
+        # Bounded retention: drop oldest entries beyond the retention window.
+        max_len = getattr(self, "_max_history_len", 0)
+        if max_len > 0 and len(self._state_history[sym]) > max_len:
+            excess = len(self._state_history[sym]) - max_len
+            del self._state_history[sym][:excess]
+            del self._state_ts[sym][:excess]
 
     def _lookup_observed_state(
         self,
@@ -504,10 +919,17 @@ class PipelineRunner:
 
         return hints
 
-    def _create_parent_order(self, signal, delta: int, state: "MarketState"):
+    def _create_parent_order(
+        self,
+        signal,
+        delta: int,
+        state: "MarketState",
+        true_state: "MarketState | None" = None,
+    ):
         if delta == 0:
             return None
 
+        decision_true_state = true_state if true_state is not None else state
         parent = self._delta_computer.to_parent_order(
             symbol=state.symbol,
             delta_qty=delta,
@@ -519,6 +941,12 @@ class PipelineRunner:
         parent.meta["suggested_order_type"] = order_type.value
         parent.meta["suggested_tif"] = tif.value
         parent.meta["scheduling_hint"] = repr(self._order_scheduler.create_hint(parent, state))
+        self._annotate_decision_metadata(
+            parent.meta,
+            true_state=decision_true_state,
+            observed_state=state,
+            phase="parent_create",
+        )
 
         hints: dict[str, object] = {}
         if signal is not None and getattr(signal, "tags", None):
@@ -531,7 +959,13 @@ class PipelineRunner:
             return None
         return parent
 
-    def _slice_order(self, parent: "ParentOrder", state: "MarketState") -> list:
+    def _slice_order(
+        self,
+        parent: "ParentOrder",
+        state: "MarketState",
+        true_state: "MarketState | None" = None,
+    ) -> list:
+        decision_true_state = true_state if true_state is not None else state
         self._timing_logic.update_baseline(state)
         should_send, trigger = self._timing_logic.should_send(
             parent=parent,
@@ -573,6 +1007,12 @@ class PipelineRunner:
         child.submitted_time = state.timestamp
         child.submit_time = state.timestamp
         child.arrival_mid = parent.arrival_mid
+        self._annotate_decision_metadata(
+            child.meta,
+            true_state=decision_true_state,
+            observed_state=state,
+            phase="child_slice",
+        )
         child.meta.setdefault("reprice_count", 0)
         if hints:
             child.meta["execution_hints"] = dict(hints)
@@ -589,6 +1029,13 @@ class PipelineRunner:
             return []
 
         parent.child_orders.append(child)
+        child.meta["canonical_tick_interval_ms"] = float(self._canonical_tick_ms)
+        if self._fill_simulator is not None and hasattr(self._fill_simulator, "register_submit_request"):
+            submit_request_time = decision_true_state.timestamp
+            self._fill_simulator.register_submit_request(child, submit_request_time)
+
+        # TimingLogic current_time is based on observed-state timestamps, so
+        # last_sent must share the same clock to keep elapsed calculations sane.
         self._last_child_submission[parent.symbol] = state.timestamp
         return [child]
 
@@ -601,17 +1048,35 @@ class PipelineRunner:
         return self._micro_event_handler.is_tradable(state, events)
 
     def _process_open_orders(self, parent, true_state, observed_state, events):
-        """Process open child orders: cancel/replace decisions use observed_state,
-        fills and exchange-side checks use true_state."""
+        """Process open children with delayed-cancel lifecycle gating.
+
+        - Cancel/replace decisions use observed_state timestamps
+        - Submit/cancel lifecycle gating and fills use true_state timestamps
+        """
         from execution_planning.layer3_order.order_types import OrderStatus
+
         symbol = parent.symbol
         open_children = self._open_child_orders.get(symbol, [])
         if not open_children:
             return []
 
+        live_children = []
+        for child in open_children:
+            if (
+                self._fill_simulator is not None
+                and hasattr(self._fill_simulator, "finalize_cancel_if_due")
+                and self._fill_simulator.finalize_cancel_if_due(child, true_state.timestamp)
+            ):
+                continue
+            live_children.append(child)
+
+        if not live_children:
+            self._sync_open_children(symbol, parent)
+            return []
+
         if not self._is_state_actionable(true_state, events):
-            for child in self._micro_event_handler.cancel_orders_on_halt(open_children, events):
-                self._cancel_child(child, true_state, reason="micro_event_block")
+            for child in self._micro_event_handler.cancel_orders_on_halt(live_children, events):
+                self._request_cancel_child(child, true_state, reason="micro_event_block")
             self._sync_open_children(symbol, parent)
             return []
 
@@ -620,9 +1085,18 @@ class PipelineRunner:
         max_reprices = hints.get("max_reprices") if isinstance(hints, dict) else None
         placement_mode = hints.get("placement_mode") if isinstance(hints, dict) else None
 
+        decision_candidates = [
+            child
+            for child in live_children
+            if (
+                not bool((child.meta or {}).get("cancel_pending", False))
+                and child.status != OrderStatus.PENDING
+            )
+        ]
+
         # Cancel/replace decisions use observed (delayed) market data
         actions = self._cancel_replace.process_open_orders(
-            open_orders=open_children,
+            open_orders=decision_candidates,
             state=observed_state,
             current_time=observed_state.timestamp,
             cancel_after_ticks=(int(cancel_after_ticks) if isinstance(cancel_after_ticks, (int, float)) else None),
@@ -630,56 +1104,104 @@ class PipelineRunner:
             placement_mode=(str(placement_mode) if isinstance(placement_mode, str) else None),
         )
 
-        executable_children = []
+        executable_children = [
+            child
+            for child in live_children
+            if (
+                bool((child.meta or {}).get("cancel_pending", False))
+                or child.status == OrderStatus.PENDING
+            )
+        ]
+
         for action in actions:
             child = action["order"]
             decision = action["action"]
+            self._annotate_decision_metadata(
+                child.meta,
+                true_state=true_state,
+                observed_state=observed_state,
+                phase=f"cancel_replace:{decision}",
+            )
             if decision == "cancel":
-                self._cancel_child(child, true_state, reason=action["reason"])
+                self._request_cancel_child(child, true_state, reason=action["reason"])
+                if child.is_active:
+                    executable_children.append(child)
                 continue
             if decision == "replace":
                 replacement = self._replace_child_order(
-                    parent=parent, child=child, state=true_state,
+                    parent=parent, child=child, true_state=true_state, observed_state=observed_state,
                     new_price=action["new_price"], reason=action["reason"],
                 )
                 if replacement is not None:
                     executable_children.append(replacement)
                 continue
-            if child.status == OrderStatus.PENDING:
-                child.status = OrderStatus.OPEN
             executable_children.append(child)
+
+        if self._fill_simulator is None:
+            self._sync_open_children(symbol, parent)
+            return []
 
         # Fill execution uses true (current) market state
         fills = self._fill_simulator.simulate_fills(parent, executable_children, true_state)
         self._sync_open_children(symbol, parent)
         return fills
 
+    def _request_cancel_child(self, child, state, reason):
+        if not child.is_active:
+            return
+        if not isinstance(child.meta, dict):
+            child.meta = {}
+
+        if self._fill_simulator is not None and hasattr(self._fill_simulator, "register_cancel_request"):
+            self._fill_simulator.register_cancel_request(child, state.timestamp, reason)
+            return
+
+        # Fallback for unit tests that bypass component setup.
+        self._cancel_child(child, state, reason=reason)
+
     def _cancel_child(self, child, state, reason):
         from execution_planning.layer3_order.order_types import OrderStatus
+
         child.status = OrderStatus.CANCELLED
         child.cancel_time = state.timestamp
+        if not isinstance(child.meta, dict):
+            child.meta = {}
+        child.meta["cancel_pending"] = False
         child.meta["cancel_reason"] = reason
 
-    def _replace_child_order(self, parent, child, state, new_price, reason):
+    def _replace_child_order(self, parent, child, true_state, observed_state, new_price, reason):
         from execution_planning.layer3_order.order_types import ChildOrder
         remaining_qty = child.remaining_qty
-        self._cancel_child(child, state, reason=f"replace:{reason}")
+        # Intentional minimal exception: replace currently uses immediate
+        # cancel of the old child, then starts a new child lifecycle.
+        self._cancel_child(child, true_state, reason=f"replace:{reason}")
         if remaining_qty <= 0 or new_price is None:
             return None
 
         replacement_child = ChildOrder.create(
             parent=parent, order_type=child.order_type,
             qty=remaining_qty, price=new_price, tif=child.tif,
-            submitted_time=state.timestamp, arrival_mid=child.arrival_mid,
+            submitted_time=observed_state.timestamp, arrival_mid=child.arrival_mid,
         )
         replacement_child.meta["replaces"] = child.child_id
         replacement_child.meta["replace_reason"] = reason
+        self._annotate_decision_metadata(
+            replacement_child.meta,
+            true_state=true_state,
+            observed_state=observed_state,
+            phase="replace_create",
+        )
         prev_reprices = int(child.meta.get("reprice_count", 0))
         replacement_child.meta["reprice_count"] = prev_reprices + 1
         if parent.meta and isinstance(parent.meta.get("execution_hints"), dict):
             replacement_child.meta["execution_hints"] = dict(parent.meta["execution_hints"])
         parent.child_orders.append(replacement_child)
-        self._last_child_submission[parent.symbol] = state.timestamp
+        replacement_child.meta["canonical_tick_interval_ms"] = float(self._canonical_tick_ms)
+        if self._fill_simulator is not None and hasattr(self._fill_simulator, "register_submit_request"):
+            self._fill_simulator.register_submit_request(replacement_child, true_state.timestamp)
+
+        # Cancel/replace timing also runs on observed-state timestamps.
+        self._last_child_submission[parent.symbol] = observed_state.timestamp
         return replacement_child
 
     def _sync_open_children(self, symbol, parent):

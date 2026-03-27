@@ -18,9 +18,15 @@ backtest:
   trade_lookback: 100
 
   # 단일 백테스트 기본값
-  # NOTE: latency_ms is order-to-ack delay (milliseconds), NOT the tick interval.
+  # NOTE: latency_ms is a compatibility alias for venue lifecycle latency
+  # (milliseconds), NOT the tick interval.
   # Tick interval is derived from `resample` above (1s → 1000ms, 500ms → 500ms).
   # cancel_after_ticks uses the tick interval, not latency_ms.
+  # Alias mapping (when nested latency fields are omitted):
+  #   order_submit_ms = latency_ms * 0.3
+  #   order_ack_ms    = latency_ms * 0.7
+  #   cancel_ms       = latency_ms * 0.2
+  # This alias must NOT be used to derive market_data_delay_ms.
   latency_ms: 100.0
   fee_model: krx
   impact_model: linear
@@ -36,4 +42,9 @@ backtest:
   # At "1s" resolution, small delays (< 1000ms) often collapse to the same state.
   # At "500ms" resolution, moderate delays (>= 200ms) yield distinct observed_state.
   market_data_delay_ms: 0.0
+  # Decision latency: strategy compute time between seeing a state and acting (ms).
+  # 0.0 = instant. Separate from observation lag (which state is seen) and
+  # order submission latency (how long the venue takes to receive the order).
+  # Effective lookup delay = market_data_delay_ms + decision_compute_ms.
+  decision_compute_ms: 0.0
   compute_attribution: true

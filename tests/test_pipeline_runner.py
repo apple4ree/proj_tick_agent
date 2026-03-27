@@ -201,8 +201,31 @@ def test_pipeline_runner_manages_open_orders_and_halts():
         parent, true_state=state2, observed_state=state2, events=events,
     )
     assert fills_after_halt == []
-    assert replacement_child.status == OrderStatus.CANCELLED
-    assert "micro_event_block" in replacement_child.meta["cancel_reason"]
+    if replacement_child.status == OrderStatus.CANCELLED:
+        assert "micro_event_block" in replacement_child.meta["cancel_reason"]
+    else:
+        assert replacement_child.status in {OrderStatus.OPEN, OrderStatus.PENDING, OrderStatus.PARTIAL}
+        assert replacement_child.meta.get("cancel_pending") is True
+        assert replacement_child.meta.get("cancel_request_reason") == "micro_event_block"
+        assert replacement_child.meta.get("cancel_effective_time") is not None
+
+        state3 = _make_state(
+            timestamp=start_ts + pd.Timedelta(seconds=3),
+            best_bid=10_000.2,
+            best_ask=10_005.2,
+            bid_volumes=[4_000, 3_000, 2_000, 1_000],
+            ask_volumes=[100, 100, 100, 100],
+            tradable=False,
+            session="halted",
+        )
+        events3 = runner._process_micro_events(state2, state3)
+        fills_after_halt2 = runner._process_open_orders(
+            parent, true_state=state3, observed_state=state3, events=events3,
+        )
+        assert fills_after_halt2 == []
+        assert replacement_child.status == OrderStatus.CANCELLED
+        assert "micro_event_block" in replacement_child.meta["cancel_reason"]
+
     assert any(event.event_type == MicroEventType.TRADING_HALT for event in events)
 
 

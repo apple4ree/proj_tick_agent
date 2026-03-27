@@ -189,6 +189,18 @@ class TestLatencyIndependence:
             assert runner_500ms._canonical_tick_ms == 500.0
 
 
+    def test_latency_alias_does_not_set_observation_lag(self):
+        cfg = BacktestConfig(
+            symbol="TEST",
+            start_date="2026-03-13",
+            end_date="2026-03-13",
+            latency_ms=100.0,
+            market_data_delay_ms=0.0,
+        )
+        assert cfg.latency.order_submit_ms == 30.0
+        assert cfg.market_data_delay_ms == 0.0
+
+
 # ===================================================================
 # 4. PipelineRunner injects canonical tick interval
 # ===================================================================

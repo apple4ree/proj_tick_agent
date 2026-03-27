@@ -4,7 +4,11 @@ latency_model.py
 지연 simulation for Layer 5.
 
 Models the round-trip latency from strategy signal to exchange acknowledgment,
-and market-data staleness (the observation delay).
+and venue lifecycle delays.
+
+Strategy-side observation/decision delays (`market_data_delay_ms`, `decision_compute_ms`)
+are intentionally NOT modeled here; they are applied in `PipelineRunner` as
+decision-path stale-state lookup semantics to avoid double-counting with venue latency.
 
 LatencyProfile holds the baseline timing constants.
 LatencyModel samples stochastic latency values and applies observation delay.
@@ -36,7 +40,9 @@ class LatencyProfile:
     cancel_ms : float
         One-way latency for cancel requests.
     market_data_delay_ms : float
-        Age of the market-data feed relative to wall clock.
+        Compatibility-only field for legacy callers.
+        PipelineRunner uses top-level `market_data_delay_ms` in BacktestConfig
+        as the canonical observation-lag source.
     """
     order_submit_ms: float = 0.5
     order_ack_ms: float = 1.0
@@ -110,20 +116,27 @@ class LatencyModel:
         """Sample exchange-acknowledgment latency (ms)."""
         return self._sample(self.profile.order_ack_ms)
 
+    def sample_submit_and_ack_latency(self) -> tuple[float, float]:
+        """Sample one submit/ack pair for a single order lifecycle."""
+        submit_ms = self.sample_submit_latency()
+        ack_ms = self.sample_ack_latency()
+        return submit_ms, ack_ms
+
     def sample_cancel_latency(self) -> float:
         """Sample cancel-request latency (ms)."""
         return self._sample(self.profile.cancel_ms)
 
     def sample_data_delay(self) -> float:
-        """Sample market-data staleness delay (ms)."""
+        """Sample profile market-data delay (ms, compatibility only)."""
         return self._sample(self.profile.market_data_delay_ms)
 
     def total_round_trip_ms(self) -> float:
         """
         Sample total round-trip time: submit + ack.
-        Does *not* include further processing time on the strategy side.
+        Does *not* include strategy-side compute delay (`decision_compute_ms`).
         """
-        return self.sample_submit_latency() + self.sample_ack_latency()
+        submit_ms, ack_ms = self.sample_submit_and_ack_latency()
+        return submit_ms + ack_ms
 
     # ------------------------------------------------------------------
     # Observation delay

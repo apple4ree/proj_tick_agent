@@ -143,6 +143,70 @@ def test_backtest_script_builds_states_and_runs_pipeline():
         assert result.n_fills >= 1
         assert summary["fill_rate"] > 0.0
 
+        run_dir = Path(output_tmp) / result.run_id
+        assert (run_dir / "summary.json").exists()
+        assert (run_dir / "realism_diagnostics.json").exists()
+
+        saved_summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
+        for key in (
+            "resample_interval",
+            "canonical_tick_interval_ms",
+            "configured_market_data_delay_ms",
+            "avg_observation_staleness_ms",
+            "configured_decision_compute_ms",
+            "decision_latency_enabled",
+            "effective_delay_ms",
+            "queue_model",
+            "queue_position_assumption",
+            "state_history_max_len",
+            "strategy_runtime_lookback_ticks",
+            "avg_child_lifetime_seconds",
+            "cancel_rate",
+        ):
+            assert key in saved_summary
+
+        diagnostics = json.loads((run_dir / "realism_diagnostics.json").read_text(encoding="utf-8"))
+        for section in (
+            "observation_lag",
+            "decision_latency",
+            "tick_time",
+            "lifecycle",
+            "queue",
+            "latency",
+            "cancel_reasons",
+            "timings",
+            "config_snapshot",
+        ):
+            assert section in diagnostics
+
+        assert "canonical_tick_interval_ms" in diagnostics["tick_time"]
+        assert "configured_decision_compute_ms" in diagnostics["decision_latency"]
+        assert "avg_decision_state_age_ms" in diagnostics["decision_latency"]
+        assert "decision_state_samples_count" in diagnostics["decision_latency"]
+        for key in ("queue_wait_ticks", "queue_wait_ms", "blocked_miss_count", "ready_but_not_filled_count"):
+            assert key in diagnostics["queue"]
+        assert "configured_order_submit_ms" in diagnostics["latency"]
+        assert "configured_order_ack_ms" in diagnostics["latency"]
+        assert "configured_cancel_ms" in diagnostics["latency"]
+        assert "avg_cancel_effective_lag_ms" in diagnostics["latency"]
+        assert "cancel_pending_count" in diagnostics["latency"]
+        assert "fills_before_cancel_effective_count" in diagnostics["latency"]
+        assert diagnostics["latency"]["order_ack_used_for_fill_gating"] is False
+        assert diagnostics["latency"]["latency_alias_applied"] is True
+        for key in ("max_children_per_parent", "max_cancelled_children_per_parent", "top_parent_by_children", "top_parent_by_cancelled_children"):
+            assert key in diagnostics["lifecycle"]
+        assert "configured_order_submit_ms" in saved_summary
+        assert saved_summary["latency_alias_applied"] is True
+        assert "configured_cancel_ms" in saved_summary
+        assert "queue_wait_ms" not in saved_summary
+        assert "cancel_pending_count" not in saved_summary
+        assert "max_children_per_parent" not in saved_summary
+        assert "counts" in diagnostics["cancel_reasons"]
+        assert "shares" in diagnostics["cancel_reasons"]
+        for bucket in ("timeout", "adverse_selection", "stale_price", "max_reprices_reached", "micro_event_block", "unknown"):
+            assert bucket in diagnostics["cancel_reasons"]["counts"]
+            assert bucket in diagnostics["cancel_reasons"]["shares"]
+
 
 def test_backtest_config_from_cfg():
     backtest = _load_backtest_module()
@@ -240,3 +304,47 @@ def test_backtest_config_from_cfg_override_takes_precedence():
         market_data_delay_ms=999.0,
     )
     assert bc.market_data_delay_ms == 999.0
+
+
+def test_build_config_propagates_decision_compute_ms():
+    """build_config() must forward decision_compute_ms to BacktestConfig."""
+    backtest = _load_backtest_module()
+    import argparse
+
+    args = argparse.Namespace(
+        symbol="005930",
+        start_date="20260313",
+        end_date=None,
+    )
+    bt_cfg = {"decision_compute_ms": 123.0}
+    config = backtest.build_config(args, bt_cfg)
+    assert config.decision_compute_ms == 123.0
+
+
+def test_backtest_config_from_cfg_propagates_decision_compute_ms():
+    """backtest_config_from_cfg() must forward decision_compute_ms."""
+    backtest = _load_backtest_module()
+    cfg = {
+        "backtest": {
+            "decision_compute_ms": 321.0,
+        },
+    }
+    bc = backtest.backtest_config_from_cfg(
+        cfg, symbol="005930", start_date="20260313",
+    )
+    assert bc.decision_compute_ms == 321.0
+
+
+def test_backtest_config_from_cfg_decision_override_takes_precedence():
+    """Keyword override for decision_compute_ms wins over config."""
+    backtest = _load_backtest_module()
+    cfg = {
+        "backtest": {
+            "decision_compute_ms": 100.0,
+        },
+    }
+    bc = backtest.backtest_config_from_cfg(
+        cfg, symbol="005930", start_date="20260313",
+        decision_compute_ms=999.0,
+    )
+    assert bc.decision_compute_ms == 999.0

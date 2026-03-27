@@ -141,6 +141,7 @@ def build_config(args: argparse.Namespace, bt_cfg: dict | None = None) -> Backte
         queue_model=bt.get("queue_model", "prob_queue"),
         queue_position_assumption=bt.get("queue_position_assumption", 0.5),
         market_data_delay_ms=float(bt.get("market_data_delay_ms", 0.0)),
+        decision_compute_ms=float(bt.get("decision_compute_ms", 0.0)),
         compute_attribution=bt.get("compute_attribution", True),
     )
 
@@ -233,6 +234,7 @@ def backtest_config_from_cfg(
         "queue_model": bt.get("queue_model", "prob_queue"),
         "queue_position_assumption": bt.get("queue_position_assumption", 0.5),
         "market_data_delay_ms": float(bt.get("market_data_delay_ms", 0.0)),
+        "decision_compute_ms": float(bt.get("decision_compute_ms", 0.0)),
         "compute_attribution": bt.get("compute_attribution", True),
     }
     base.update(overrides)
