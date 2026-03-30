@@ -27,6 +27,53 @@ from .utils.response_parser import (
 
 logger = logging.getLogger(__name__)
 
+_SHORT_HORIZON_THRESHOLD_TICKS = 30
+_SHORT_HORIZON_STYLE_HINTS: frozenset[str] = frozenset({
+    "momentum",
+    "scalping",
+    "execution_adaptive",
+})
+
+
+def _infer_plan_holding_horizon_ticks(plan: StrategyPlan) -> int | None:
+    inferred: int | None = None
+    for xp in plan.exit_policies:
+        for rule in xp.rules:
+            cond = rule.condition
+            if (
+                cond.position_attr == "holding_ticks"
+                and cond.op in {">=", ">"}
+                and cond.threshold is not None
+            ):
+                ticks = int(cond.threshold)
+                if inferred is None or ticks < inferred:
+                    inferred = ticks
+    return inferred
+
+
+def _execution_policy_trace_flags(plan: StrategyPlan) -> dict[str, Any]:
+    holding_horizon = _infer_plan_holding_horizon_ticks(plan)
+    style_hint = str(plan.strategy_style or "").strip().lower()
+    fast_entry = any(0 < ep.cooldown_ticks <= _SHORT_HORIZON_THRESHOLD_TICKS for ep in plan.entry_policies)
+
+    inferred_short_horizon = (
+        holding_horizon is not None and holding_horizon <= _SHORT_HORIZON_THRESHOLD_TICKS
+    ) or (
+        holding_horizon is None
+        and style_hint in _SHORT_HORIZON_STYLE_HINTS
+        and fast_entry
+    )
+
+    execution_policy_explicit = plan.execution_policy is not None
+    return {
+        "execution_policy_explicit": execution_policy_explicit,
+        "inferred_holding_horizon_ticks": holding_horizon,
+        "inferred_short_horizon": inferred_short_horizon,
+        "execution_policy_missing_short_horizon": (
+            (not execution_policy_explicit) and inferred_short_horizon
+        ),
+    }
+
 
 def _build_mock_plan(research_goal: str) -> StrategyPlan:
     """Build a deterministic mock plan for testing without API calls."""
@@ -66,6 +113,7 @@ def _build_mock_plan(research_goal: str) -> StrategyPlan:
     from .schemas.plan_schema import (
         ConditionPlan,
         EntryPlan,
+        ExecutionPlan,
         ExitPolicyPlan,
         ExitRulePlan,
         PreconditionPlan,
@@ -153,6 +201,11 @@ def _build_mock_plan(research_goal: str) -> StrategyPlan:
             base_size=100,
             max_size=400,
         ),
+        execution_policy=ExecutionPlan(
+            placement_mode="passive_join",
+            cancel_after_ticks=15,
+            max_reprices=2,
+        ),
         notes=f"Mock plan generated for goal: {research_goal}",
     )
 
@@ -163,6 +216,7 @@ def generate_plan_with_openai(
     research_goal: str,
     latency_ms: float = 1.0,
     strategy_style: str = "auto",
+    backtest_environment: dict[str, Any] | None = None,
 ) -> tuple[StrategyPlan, dict[str, Any]]:
     """Generate a StrategyPlan using OpenAI structured output.
 
@@ -178,6 +232,13 @@ def generate_plan_with_openai(
         plan = _build_mock_plan(research_goal)
         trace["parse_success"] = True
         trace["source"] = "mock"
+        trace.update(_execution_policy_trace_flags(plan))
+
+        plan_warnings = validate_plan(plan)
+        if plan_warnings:
+            trace["plan_warnings"] = plan_warnings
+            for w in plan_warnings:
+                logger.warning("Plan validation warning: %s", w)
 
         # Hard gate applies to mock plans too
         attr_errors = check_position_attr_misuse(plan)
@@ -196,6 +257,7 @@ def generate_plan_with_openai(
         research_goal=research_goal,
         strategy_style=strategy_style,
         latency_ms=latency_ms,
+        backtest_environment=backtest_environment,
     )
 
     response = client.query_structured(
@@ -216,6 +278,7 @@ def generate_plan_with_openai(
     trace["parse_success"] = True
     trace["source"] = client.mode
     trace["client_meta"] = client.last_query_meta
+    trace.update(_execution_policy_trace_flags(plan))
 
     plan_warnings = validate_plan(plan)
     if plan_warnings:
@@ -244,6 +307,7 @@ def generate_spec_v2_with_openai(
     research_goal: str,
     latency_ms: float = 1.0,
     strategy_style: str = "auto",
+    backtest_environment: dict[str, Any] | None = None,
     reviewer: StrategyReviewerV2 | None = None,
 ) -> tuple[StrategySpecV2, dict[str, Any]]:
     """Full OpenAI v2 generation: plan -> lower -> review.
@@ -256,6 +320,7 @@ def generate_spec_v2_with_openai(
         research_goal=research_goal,
         latency_ms=latency_ms,
         strategy_style=strategy_style,
+        backtest_environment=backtest_environment,
     )
 
     # Pre-lowering guard: reject plans with position_attr misuse
@@ -267,6 +332,7 @@ def generate_spec_v2_with_openai(
         )
 
     spec = lower_plan_to_spec_v2(plan, latency_ms=latency_ms)
+    ep_flags = _execution_policy_trace_flags(plan)
 
     spec.metadata = dict(spec.metadata or {})
     spec.metadata.update({
@@ -277,16 +343,24 @@ def generate_spec_v2_with_openai(
         "generation_source": "openai_v2_plan",
         "plan_schema_version": plan.SCHEMA_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        "execution_policy_explicit": ep_flags["execution_policy_explicit"],
+        "inferred_holding_horizon_ticks": ep_flags["inferred_holding_horizon_ticks"],
+        "inferred_short_horizon": ep_flags["inferred_short_horizon"],
+        "execution_policy_missing_short_horizon": ep_flags["execution_policy_missing_short_horizon"],
     })
+
+    input_ctx: dict[str, Any] = {
+        "research_goal": research_goal,
+        "strategy_style": strategy_style,
+        "latency_ms": latency_ms,
+    }
+    if backtest_environment is not None:
+        input_ctx["backtest_environment"] = backtest_environment
 
     trace: dict[str, Any] = {
         "pipeline": "openai_v2_plan_generation",
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "input": {
-            "research_goal": research_goal,
-            "strategy_style": strategy_style,
-            "latency_ms": latency_ms,
-        },
+        "input": input_ctx,
         "plan": {
             "name": plan.name,
             "strategy_style": plan.strategy_style,
@@ -295,6 +369,10 @@ def generate_spec_v2_with_openai(
             "n_regimes": len(plan.regimes),
             "has_state_policy": plan.state_policy is not None,
             "has_execution_policy": plan.execution_policy is not None,
+            "execution_policy_explicit": ep_flags["execution_policy_explicit"],
+            "inferred_holding_horizon_ticks": ep_flags["inferred_holding_horizon_ticks"],
+            "inferred_short_horizon": ep_flags["inferred_short_horizon"],
+            "execution_policy_missing_short_horizon": ep_flags["execution_policy_missing_short_horizon"],
             "schema_version": plan.SCHEMA_VERSION,
         },
         "plan_trace": plan_trace,
@@ -306,13 +384,15 @@ def generate_spec_v2_with_openai(
             "n_exit_policies": len(spec.exit_policies),
             "n_preconditions": len(spec.preconditions),
             "n_regimes": len(spec.regimes),
+            "execution_policy_explicit": spec.metadata.get("execution_policy_explicit"),
+            "execution_policy_missing_short_horizon": spec.metadata.get("execution_policy_missing_short_horizon"),
         },
         "fallback_used": False,
         "fallback": {"used": False, "count": 0, "events": []},
     }
 
     if reviewer is not None:
-        review_result = reviewer.review(spec)
+        review_result = reviewer.review(spec, backtest_environment=backtest_environment)
         trace["static_review"] = review_result.to_dict()
         trace["static_review_passed"] = review_result.passed
     else:

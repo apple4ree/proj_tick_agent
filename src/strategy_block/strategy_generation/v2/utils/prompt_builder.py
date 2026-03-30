@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from utils.config import build_backtest_constraint_summary
+
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
 
@@ -17,12 +19,17 @@ def build_system_prompt() -> str:
     return _load_prompt("planner_system.md")
 
 
+def _format_backtest_environment_block(backtest_environment: dict | None) -> str:
+    return build_backtest_constraint_summary(backtest_environment)
+
+
 def build_user_prompt(
     *,
     research_goal: str,
     strategy_style: str = "auto",
     latency_ms: float = 1.0,
     constraints: str = "none",
+    backtest_environment: dict | None = None,
 ) -> str:
     """Return the planner user prompt with placeholders filled."""
     template = _load_prompt("planner_user.md")
@@ -31,4 +38,5 @@ def build_user_prompt(
         strategy_style=strategy_style,
         latency_ms=latency_ms,
         constraints=constraints,
+        backtest_environment_block=_format_backtest_environment_block(backtest_environment),
     )

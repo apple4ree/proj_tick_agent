@@ -1,31 +1,44 @@
-# docs/ — 프로젝트 문서
+# docs/ — Documentation Index
 
-프로젝트의 보조 문서를 모아두는 디렉토리다.
+이 디렉토리는 프로젝트 보조 문서와 분석 문서를 관리한다.
 
-## 핵심 역할
+핵심 원칙:
+- **current canonical behavior**는 Tier 1 문서에서 확인
+- **baseline/freeze 계약**은 Tier 2 문서에서 확인
+- **historical analysis**는 배경 맥락으로만 사용
 
-- CLI 명령 치트시트 제공
-- 연구 제안서 등 참고 자료 보관
+## Authoritative Hierarchy
 
-## 대표 파일
+### Tier 1 — Current Canonical Behavior
+- `../PIPELINE.md`
+- `../scripts/README.md`
+- `../src/strategy_block/strategy_generation/README.md`
+- `../src/strategy_block/strategy_review/README.md`
+- `../src/evaluation_orchestration/layer7_validation/README.md`
 
-| 파일 | 내용 |
-|------|------|
-| `COMMANDS.md` | v2 CLI 명령 치트시트 (generate, review, backtest, worker, validation tier) |
-| `research_proposal_v5.pdf` | 프로젝트 연구 제안서 |
+### Tier 2 — Freeze / Baseline
+- `analysis/benchmark_freeze_protocol.md`
+- `analysis/benchmark_freeze_results.md`
+- `analysis/benchmark_freeze_baselines.md`
+- `../outputs/benchmarks/phase4_benchmark_freeze.json`
+- `../outputs/benchmarks/phase4_benchmark_freeze.md`
 
-## 전체 문서 구조에서의 위치
+### Tier 3 — Historical Analysis
+- `analysis/*.md` 중 Tier 2 freeze 문서를 제외한 문서
+- 과거 실험/해석 기록이며, 현재 동작 계약의 1차 출처는 아님
 
-루트 레벨 문서가 프로젝트 전체를 설명하고, 이 디렉토리는 운영 참고 자료를 제공한다:
+## Recommended Reading Order
 
-- `README.md` — 프로젝트 개요 및 Quick Start
-- `ARCHITECTURE.md` — 5-Block 시스템 아키텍처
-- `PROJECT.md` — 디렉토리 맵 및 운영 상태
-- `PIPELINE.md` — 파이프라인 흐름 및 Layer 0~7 상세
-- `ADR.md` — 설계 의사결정 기록
-- `docs/COMMANDS.md` — CLI 명령 치트시트
+1. `../PIPELINE.md`
+2. `../scripts/README.md`
+3. generation/review/layer7 README
+4. `analysis/benchmark_freeze_protocol.md`
+5. `analysis/benchmark_freeze_results.md`
+6. `analysis/benchmark_freeze_baselines.md`
 
-## 관련 문서
+## Other Docs in this Directory
 
-- [../README.md](../README.md) — 프로젝트 개요
-- [COMMANDS.md](COMMANDS.md) — CLI 명령 치트시트
+- `COMMANDS.md`: 운영 명령어 치트시트
+- `backtest_realism_design.md`: realism 설계 배경/의도
+- `history/`: 변경 이력성 문서
+- `research_proposal_v5.pdf`: 연구 제안서

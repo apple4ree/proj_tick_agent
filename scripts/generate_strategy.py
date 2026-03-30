@@ -15,33 +15,48 @@ for path in (PROJECT_ROOT, SRC_ROOT):
         sys.path.insert(0, str(path))
 
 from evaluation_orchestration.orchestration.manager import OrchestrationManager
-from utils.config import load_config, get_paths, get_generation
+from utils.config import (
+    build_backtest_environment_context,
+    load_config,
+    get_paths,
+    get_generation,
+)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Submit a StrategySpec v2 generation job")
-    parser.add_argument("--goal", required=True,
-                        help="Research goal — used to select templates or prompt LLM")
-    parser.add_argument("--config", default=None,
-                        help="Optional YAML override merged on top of the default config stack "
-                             "(app+paths+generation+backtest_base+backtest_worker+workers+profile)")
-    parser.add_argument("--profile", default=None,
-                        help="Config profile (dev, smoke, prod) — merged after base files, before --config")
-    parser.add_argument("--spec-format", default=None, choices=["v2"],
-                        help="Spec format (fixed to v2)")
-    parser.add_argument("--backend", default=None,
-                        help="Generation backend: 'template' (keyword→template→lower) "
-                             "or 'openai' (goal→structured plan→lower→review)")
-    parser.add_argument("--mode", default=None,
-                        help="OpenAI client mode: 'live' (real API), 'mock' (deterministic fixture), "
-                             "'replay' (cached responses). Only affects backend=openai.")
-    parser.add_argument("--model", default=None,
-                        help="Override OpenAI model (default: from config or gpt-4o)")
-    parser.add_argument("--auto-approve", action="store_true", default=None,
-                        help="Auto-approve generated spec")
-    parser.add_argument("--direct", action="store_true",
-                        help="Generate directly (bypass job queue). "
-                             "Outputs GENERATED_SPEC=<path> for machine parsing.")
+    parser.add_argument(
+        "--goal",
+        required=True,
+        help="Research goal — used to select templates or prompt LLM",
+    )
+    parser.add_argument(
+        "--backend",
+        default=None,
+        choices=["template", "openai"],
+        help="Generation backend override (template | openai)",
+    )
+    parser.add_argument(
+        "--config",
+        default=None,
+        help=(
+            "Optional YAML override merged on top of the default config stack "
+            "(app+paths+generation+backtest_base+backtest_worker+workers+profile)"
+        ),
+    )
+    parser.add_argument(
+        "--profile",
+        default=None,
+        help="Config profile (dev, smoke, prod) — merged after base files, before --config",
+    )
+    parser.add_argument(
+        "--direct",
+        action="store_true",
+        help=(
+            "Generate directly (bypass job queue). "
+            "Outputs GENERATED_SPEC=<path> for machine parsing."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -74,14 +89,14 @@ def _run_direct(args: argparse.Namespace, cfg: dict) -> None:
     gen = get_generation(cfg)
 
     backend = args.backend or gen["backend"]
-    mode = args.mode or gen["mode"]
-    auto_approve = args.auto_approve if args.auto_approve is not None else gen["auto_approve"]
-
-    model = args.model or gen.get("openai_model", "gpt-4o")
+    mode = str(gen.get("mode", "live"))
+    model = str(gen.get("openai_model", "gpt-4o"))
     replay_path = gen.get("replay_path")
+    auto_approve = bool(gen.get("auto_approve", False))
 
     generator = StrategyGenerator(
         latency_ms=gen["latency_ms"],
+        backtest_environment=build_backtest_environment_context(cfg),
         backend=backend,
         mode=mode,
         model=model,
@@ -138,13 +153,14 @@ def _run_queue(args: argparse.Namespace, cfg: dict) -> None:
 
     payload = {
         "research_goal": args.goal,
+        "backtest_environment": build_backtest_environment_context(cfg),
         "spec_format": "v2",
         "backend": args.backend or gen["backend"],
-        "mode": args.mode or gen["mode"],
+        "mode": str(gen.get("mode", "live")),
         "latency_ms": gen["latency_ms"],
         "n_ideas": gen["n_ideas"],
         "idea_index": gen["idea_index"],
-        "auto_approve": args.auto_approve if args.auto_approve is not None else gen["auto_approve"],
+        "auto_approve": bool(gen.get("auto_approve", False)),
         "allow_template_fallback": gen["allow_template_fallback"],
         "allow_heuristic_fallback": gen["allow_heuristic_fallback"],
         "fail_on_fallback": gen["fail_on_fallback"],
@@ -170,9 +186,6 @@ def main() -> None:
         level=getattr(logging, app.get("log_level", "INFO")),
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
-
-    if args.spec_format not in (None, "v2"):
-        raise ValueError("Only spec_format='v2' is supported")
 
     if args.direct:
         _run_direct(args, cfg)

@@ -1,0 +1,30 @@
+{
+  "strategy_id": "openai_imbalance_momentum_plan_v2.0",
+  "name": "openai_imbalance_momentum_plan",
+  "version": "2.0",
+  "status": "approved",
+  "created_at": "2026-03-29T18:32:19.399056+00:00",
+  "generation_backend": "openai",
+  "generation_mode": "mock",
+  "static_review_passed": true,
+  "approved_for_backtest": false,
+  "approved_for_live": false,
+  "spec_format": "v2",
+  "spec_path": "/home/dgu/tick/proj_rl_agent/strategies/openai_imbalance_momentum_plan_v2.0.json",
+  "trace_path": "/home/dgu/tick/proj_rl_agent/outputs/strategy_traces/openai_imbalance_momentum_plan_v2.0_trace.json",
+  "extra": {
+    "generation": {
+      "generation_outcome": "success",
+      "static_review_passed": true,
+      "fallback_used": false,
+      "fallback_count": 0,
+      "fallback_events": [],
+      "generation_class": "openai_v2_plan",
+      "requested_backend": "openai",
+      "effective_backend": "openai_v2",
+      "requested_mode": "mock",
+      "effective_mode": "mock",
+      "spec_format": "v2"
+    }
+  }
+}

@@ -196,6 +196,104 @@ def get_generation(cfg: dict) -> dict[str, Any]:
     return gen
 
 
+def _resample_to_canonical_tick_ms(resample: Any) -> float:
+    """Convert a supported resample string to canonical tick milliseconds."""
+    value = str(resample or "1s").strip().lower()
+    if value.endswith("ms"):
+        return float(value[:-2])
+    if value.endswith("s"):
+        return float(value[:-1]) * 1000.0
+    raise ValueError(f"Unsupported resample format: {resample!r}")
+
+
+def _fmt_constraint_value(value: Any) -> str:
+    if value is None:
+        return "unknown"
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if numeric.is_integer():
+        return str(int(numeric))
+    return f"{numeric:.3f}".rstrip("0").rstrip(".")
+
+
+def build_backtest_constraint_summary(backtest_environment: dict[str, Any] | None) -> str:
+    """Render canonical, compact backtest constraint summary for LLM prompts."""
+    if not backtest_environment:
+        return (
+            "- Backtest constraint summary: not provided (legacy latency hint only).\n"
+            "  - Constraint-aware generation/review is degraded without environment context."
+        )
+
+    latency = dict(backtest_environment.get("latency") or {})
+    queue = dict(backtest_environment.get("queue") or {})
+    semantics = dict(backtest_environment.get("semantics") or {})
+
+    replace_model = str(semantics.get("replace_model", "unknown"))
+    if replace_model == "minimal_immediate":
+        replace_note = "replace is minimal immediate, not staged venue replace"
+    else:
+        replace_note = f"replace_model={replace_model}"
+
+    lines = [
+        "- Backtest constraint summary (canonical):",
+        f"  - Time/cadence: resample={backtest_environment.get('resample', 'unknown')}, canonical_tick_interval_ms={_fmt_constraint_value(backtest_environment.get('canonical_tick_interval_ms'))} (tick = resample step)",
+        f"  - Observation/decision delay: market_data_delay_ms={_fmt_constraint_value(backtest_environment.get('market_data_delay_ms'))}, decision_compute_ms={_fmt_constraint_value(backtest_environment.get('decision_compute_ms'))}, effective_delay_ms={_fmt_constraint_value(backtest_environment.get('effective_delay_ms'))}",
+        f"  - Venue latency: order_submit_ms={_fmt_constraint_value(latency.get('order_submit_ms'))}, order_ack_ms={_fmt_constraint_value(latency.get('order_ack_ms'))}, cancel_ms={_fmt_constraint_value(latency.get('cancel_ms'))}, order_ack_used_for_fill_gating={bool(latency.get('order_ack_used_for_fill_gating', False))}",
+        f"  - Queue semantics: queue_model={queue.get('queue_model', 'unknown')}, queue_position_assumption={_fmt_constraint_value(queue.get('queue_position_assumption'))}",
+        "  - passive fills require queue waiting",
+        "  - repricing resets queue position",
+        f"  - Replace semantics: {replace_note}",
+        "  - submit/cancel latency compounds churn cost under repeated cancel/repost loops",
+        "  - short-horizon strategies are more vulnerable to these frictions",
+        "  - low-churn execution is preferred under queue and latency friction",
+    ]
+
+    return "\n".join(lines)
+
+
+def build_backtest_environment_context(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Build canonical backtest-environment context for generation/review agents."""
+    from evaluation_orchestration.layer7_validation.backtest_config import BacktestConfig
+
+    bt = get_backtest(cfg)
+    resolved = BacktestConfig.from_dict({
+        "symbol": "__generation__",
+        "start_date": "19700101",
+        "end_date": "19700101",
+        **bt,
+    })
+    canonical_tick_ms = _resample_to_canonical_tick_ms(bt.get("resample", "1s"))
+    effective_delay_ms = float(resolved.market_data_delay_ms + resolved.decision_compute_ms)
+
+    return {
+        "resample": str(bt.get("resample", "1s")),
+        "canonical_tick_interval_ms": float(canonical_tick_ms),
+        "market_data_delay_ms": float(resolved.market_data_delay_ms),
+        "decision_compute_ms": float(resolved.decision_compute_ms),
+        "effective_delay_ms": effective_delay_ms,
+        "latency": {
+            "order_submit_ms": float(resolved.latency.order_submit_ms or 0.0),
+            "order_ack_ms": float(resolved.latency.order_ack_ms or 0.0),
+            "cancel_ms": float(resolved.latency.cancel_ms or 0.0),
+            "order_ack_used_for_fill_gating": False,
+            "latency_alias_applied": bool(getattr(resolved, "_latency_alias_applied", False)),
+            "profile": str(resolved.latency.profile),
+        },
+        "queue": {
+            "queue_model": str(resolved.exchange.queue_model),
+            "queue_position_assumption": float(resolved.exchange.queue_position_assumption),
+        },
+        "semantics": {
+            "tick_is_resample_step": True,
+            "submit_latency_gating": True,
+            "cancel_latency_gating": True,
+            "replace_model": "minimal_immediate",
+        },
+    }
+
+
 def get_backtest(cfg: dict) -> dict[str, Any]:
     """Extract the ``backtest`` section with sensible defaults.
 

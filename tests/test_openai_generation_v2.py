@@ -36,6 +36,7 @@ from strategy_block.strategy_generation.v2.openai_generation import (
 from strategy_block.strategy_generation.v2.schemas.plan_schema import (
     ConditionPlan,
     EntryPlan,
+    ExecutionPlan,
     ExitPolicyPlan,
     ExitRulePlan,
     PreconditionPlan,
@@ -53,6 +54,7 @@ from strategy_block.strategy_generation.v2.utils.response_parser import (
     validate_plan,
 )
 from strategy_block.strategy_review.v2.reviewer_v2 import StrategyReviewerV2
+from strategy_block.strategy_generation.v2.utils.prompt_builder import build_user_prompt
 from strategy_block.strategy_specs.v2.schema_v2 import StrategySpecV2
 
 
@@ -132,6 +134,11 @@ def _make_minimal_plan(
             sizing_mode="fixed",
             base_size=100,
             max_size=400,
+        ),
+        execution_policy=ExecutionPlan(
+            placement_mode="passive_join",
+            cancel_after_ticks=15,
+            max_reprices=2,
         ),
     )
 
@@ -288,6 +295,14 @@ class TestResponseParser:
         warnings = validate_plan(plan)
         assert any("close_all" in w for w in warnings)
 
+    def test_validate_plan_short_horizon_missing_execution_policy_warns(self):
+        plan = _make_minimal_plan()
+        plan.execution_policy = None
+        # tighten time exit to short horizon
+        plan.exit_policies[0].rules[1].condition.threshold = 10.0
+        warnings = validate_plan(plan)
+        assert any("Short-horizon plan has no execution_policy" in w for w in warnings)
+
 
 # ── OpenAI generation module (mock mode) ─────────────────────────────
 
@@ -302,6 +317,16 @@ class TestGeneratePlanWithOpenAI:
         assert isinstance(plan, StrategyPlan)
         assert trace["source"] == "mock"
         assert trace["parse_success"] is True
+
+    def test_mock_mode_trace_includes_execution_policy_flags(self, mock_client: OpenAIStrategyGenClient):
+        plan, trace = generate_plan_with_openai(
+            client=mock_client,
+            research_goal="test momentum",
+        )
+        assert plan.execution_policy is not None
+        assert trace["execution_policy_explicit"] is True
+        assert trace["execution_policy_missing_short_horizon"] is False
+        assert "inferred_holding_horizon_ticks" in trace
 
     def test_mock_mode_different_goals(self, mock_client: OpenAIStrategyGenClient):
         plan1, _ = generate_plan_with_openai(
@@ -356,6 +381,10 @@ class TestGenerateSpecV2WithOpenAI:
         assert "plan_trace" in trace
         assert trace["output"]["spec_format"] == "v2"
 
+        assert "execution_policy_explicit" in trace["plan"]
+        assert "inferred_short_horizon" in trace["plan"]
+        assert "execution_policy_explicit" in trace["output"]
+
     def test_metadata_has_generation_source(
         self,
         mock_client: OpenAIStrategyGenClient,
@@ -406,6 +435,40 @@ class TestGeneratorOpenAIBackend:
         spec, trace = gen.generate(research_goal="spread fade strategy")
         assert isinstance(spec, StrategySpecV2)
         assert trace["generation_outcome"] == "success"
+
+    def test_mock_mode_trace_includes_backtest_environment(self):
+        gen = StrategyGenerator(
+            backend="openai",
+            mode="mock",
+            spec_format="v2",
+            backtest_environment={
+                "resample": "500ms",
+                "canonical_tick_interval_ms": 500.0,
+                "market_data_delay_ms": 200.0,
+                "decision_compute_ms": 50.0,
+                "effective_delay_ms": 250.0,
+                "latency": {
+                    "order_submit_ms": 5.0,
+                    "order_ack_ms": 15.0,
+                    "cancel_ms": 3.0,
+                    "order_ack_used_for_fill_gating": False,
+                },
+                "queue": {
+                    "queue_model": "risk_adverse",
+                    "queue_position_assumption": 0.5,
+                },
+                "semantics": {
+                    "submit_latency_gating": True,
+                    "cancel_latency_gating": True,
+                    "replace_model": "minimal_immediate",
+                },
+            },
+        )
+        _, trace = gen.generate(research_goal="imbalance momentum")
+        env = trace["input"]["backtest_environment"]
+        assert env["resample"] == "500ms"
+        assert env["latency"]["order_submit_ms"] == 5.0
+        assert env["queue"]["queue_model"] == "risk_adverse"
 
 
 # ── Fallback policies ────────────────────────────────────────────────
@@ -952,3 +1015,38 @@ class TestStatePolicyLowering:
         assert plan_result.state_policy is not None
         assert len(plan_result.state_policy.vars) == 1
         assert plan_result.state_policy.vars[0].name == "streak"
+
+
+def test_build_user_prompt_includes_canonical_backtest_constraint_summary():
+    prompt = build_user_prompt(
+        research_goal="test momentum",
+        strategy_style="momentum",
+        latency_ms=1.0,
+        backtest_environment={
+            "resample": "500ms",
+            "canonical_tick_interval_ms": 500.0,
+            "market_data_delay_ms": 200.0,
+            "decision_compute_ms": 50.0,
+            "effective_delay_ms": 250.0,
+            "latency": {
+                "order_submit_ms": 5.0,
+                "order_ack_ms": 15.0,
+                "cancel_ms": 3.0,
+                "order_ack_used_for_fill_gating": False,
+            },
+            "queue": {
+                "queue_model": "risk_adverse",
+                "queue_position_assumption": 0.5,
+            },
+            "semantics": {
+                "submit_latency_gating": True,
+                "cancel_latency_gating": True,
+                "replace_model": "minimal_immediate",
+            },
+        },
+    )
+
+    assert "Backtest constraint summary (canonical)" in prompt
+    assert "tick = resample step" in prompt
+    assert "queue_model=risk_adverse" in prompt
+    assert "replace is minimal immediate, not staged venue replace" in prompt

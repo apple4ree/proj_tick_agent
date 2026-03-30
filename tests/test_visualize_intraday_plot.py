@@ -48,8 +48,8 @@ def _write_minimal_run_artifacts(run_dir: Path) -> None:
             "slippage_bps": [1.1, -0.8, 0.6],
             "market_impact_bps": [0.3, 0.2, 0.4],
             "latency_ms": [1.5, 1.8, 1.2],
-            "parent_id": ["p1", "p2", "p3"],
-            "order_id": ["o1", "o2", "o3"],
+            "parent_id": ["o1", "o2", "o3"],
+            "order_id": ["c1", "c2", "c3"],
         }
     ).to_csv(run_dir / "fills.csv", index=False)
 
@@ -60,7 +60,16 @@ def _write_minimal_run_artifacts(run_dir: Path) -> None:
         }
     ).to_csv(run_dir / "orders.csv", index=False)
 
-    # report_builder saves pnl_entries with timestamp index; mimic that shape.
+    pd.DataFrame(
+        {
+            "timestamp": ts,
+            "symbol": ["005930"] * len(ts),
+            "best_bid": [99990, 99995, 100000, 100010, 100015, 100020],
+            "best_ask": [100010, 100015, 100020, 100030, 100035, 100040],
+            "mid_price": [100000, 100005, 100010, 100020, 100025, 100030],
+        }
+    ).to_csv(run_dir / "market_quotes.csv", index=False)
+
     pnl_entries = pd.DataFrame(
         {
             "timestamp": [ts[1], ts[2], ts[3], ts[4], ts[5]],
@@ -103,6 +112,84 @@ def _write_minimal_run_artifacts(run_dir: Path) -> None:
                 "annualized_vol": 0.12,
                 "annualized_turnover": 1.8,
                 "avg_latency_ms": 1.5,
+                "cancel_rate": 0.2,
+                "signal_count": 6,
+                "parent_order_count": 3,
+                "child_order_count": 6,
+                "avg_child_lifetime_seconds": 1.4,
+            },
+            fh,
+        )
+
+    with (run_dir / "realism_diagnostics.json").open("w", encoding="utf-8") as fh:
+        json.dump(
+            {
+                "observation_lag": {
+                    "configured_market_data_delay_ms": 0.0,
+                    "avg_observation_staleness_ms": 0.0,
+                    "effective_delay_ms": 0.0,
+                    "resample_interval": "1s",
+                    "canonical_tick_interval_ms": 1000.0,
+                },
+                "decision_latency": {
+                    "configured_decision_compute_ms": 0.0,
+                    "decision_latency_enabled": False,
+                    "avg_decision_state_age_ms": 0.0,
+                },
+                "tick_time": {
+                    "canonical_tick_interval_ms": 1000.0,
+                    "resample_interval": "1s",
+                    "state_history_max_len": 64,
+                    "strategy_runtime_lookback_ticks": 12,
+                    "history_safety_buffer_ticks": 10,
+                },
+                "queue": {
+                    "queue_model": "prob_queue",
+                    "queue_position_assumption": 0.5,
+                    "queue_wait_ticks": 1.1,
+                    "queue_wait_ms": 1100.0,
+                    "blocked_miss_count": 2,
+                    "ready_but_not_filled_count": 1,
+                },
+                "cancel_reasons": {
+                    "counts": {
+                        "timeout": 2,
+                        "adverse_selection": 1,
+                        "stale_price": 0,
+                        "max_reprices_reached": 0,
+                        "micro_event_block": 0,
+                        "unknown": 0,
+                    },
+                    "shares": {
+                        "timeout": 0.6667,
+                        "adverse_selection": 0.3333,
+                        "stale_price": 0.0,
+                        "max_reprices_reached": 0.0,
+                        "micro_event_block": 0.0,
+                        "unknown": 0.0,
+                    },
+                },
+                "latency": {
+                    "sampled_avg_submit_latency_ms": 1.0,
+                    "sampled_avg_cancel_latency_ms": 0.5,
+                    "sampled_avg_fill_latency_ms": 1.4,
+                    "cancel_pending_count": 0,
+                    "fills_before_cancel_effective_count": 0,
+                    "avg_cancel_effective_lag_ms": 0.5,
+                    "configured_order_submit_ms": 1.0,
+                    "configured_cancel_ms": 0.5,
+                },
+                "lifecycle": {
+                    "signal_count": 6,
+                    "parent_order_count": 3,
+                    "child_order_count": 6,
+                    "n_fills": 3,
+                    "cancel_rate": 0.2,
+                    "avg_child_lifetime_seconds": 1.4,
+                    "max_children_per_parent": 4,
+                    "max_cancelled_children_per_parent": 2,
+                    "top_parent_by_children": "o1",
+                },
             },
             fh,
         )
@@ -116,10 +203,20 @@ def test_generate_all_plots_includes_intraday_plot(tmp_path: Path):
 
     paths = visualize.generate_all_plots(run_dir, show=False)
 
-    assert len(paths) == 5
+    assert len(paths) == 8
     names = {p.name for p in paths}
-    assert "intraday_cumulative_profit.png" in names
-    assert (run_dir / "plots" / "intraday_cumulative_profit.png").exists()
+    assert names == {
+        "overview.png",
+        "signal_analysis.png",
+        "execution_quality.png",
+        "dashboard.png",
+        "intraday_cumulative_profit.png",
+        "trade_timeline.png",
+        "equity_risk.png",
+        "realism_dashboard.png",
+    }
+    for name in names:
+        assert (run_dir / "plots" / name).exists()
 
 
 def test_intraday_plot_handles_empty_data(tmp_path: Path):

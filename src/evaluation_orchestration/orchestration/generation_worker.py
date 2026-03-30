@@ -128,6 +128,7 @@ class GenerationWorker:
         """Instantiate generator and run generation from job payload."""
         generator = StrategyGenerator(
             latency_ms=payload.get("latency_ms", 1.0),
+            backtest_environment=payload.get("backtest_environment"),
             backend=payload.get("backend", "template"),
             mode=payload.get("mode", "live"),
             replay_path=payload.get("replay_path"),

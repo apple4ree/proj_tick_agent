@@ -12,6 +12,7 @@ time exits). Not required for the initial observation-lag implementation.
 """
 from __future__ import annotations
 
+import copy
 import logging
 from datetime import datetime, timezone
 from typing import Any
@@ -40,6 +41,7 @@ class StrategyGenerator:
     def __init__(
         self,
         latency_ms: float = 1.0,
+        backtest_environment: dict[str, Any] | None = None,
         *,
         backend: str = "template",
         mode: str = "live",
@@ -54,6 +56,7 @@ class StrategyGenerator:
             raise ValueError("Only spec_format='v2' is supported")
 
         self.latency_ms = latency_ms
+        self.backtest_environment = copy.deepcopy(backtest_environment) if backtest_environment else None
         self.backend = backend
         self.mode = mode
         self.model = model
@@ -193,6 +196,7 @@ class StrategyGenerator:
                 client=client,
                 research_goal=research_goal,
                 latency_ms=self.latency_ms,
+                backtest_environment=self.backtest_environment,
                 reviewer=self._reviewer_v2,
             )
 
@@ -338,7 +342,10 @@ class StrategyGenerator:
             spec=spec,
         )
 
-        review_result = self._reviewer_v2.review(spec)
+        review_result = self._reviewer_v2.review(
+            spec,
+            backtest_environment=self.backtest_environment,
+        )
         trace["static_review"] = review_result.to_dict()
         trace["static_review_passed"] = review_result.passed
 
@@ -365,16 +372,20 @@ class StrategyGenerator:
         selected_names: list[str],
         spec: StrategySpecV2,
     ) -> dict[str, Any]:
+        input_ctx: dict[str, Any] = {
+            "research_goal": research_goal,
+            "n_ideas": n_ideas,
+            "idea_index": idea_index,
+            "latency_ms": self.latency_ms,
+            "spec_format": "v2",
+        }
+        if self.backtest_environment is not None:
+            input_ctx["backtest_environment"] = copy.deepcopy(self.backtest_environment)
+
         return {
             "pipeline": "template_generator_v2",
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "input": {
-                "research_goal": research_goal,
-                "n_ideas": n_ideas,
-                "idea_index": idea_index,
-                "latency_ms": self.latency_ms,
-                "spec_format": "v2",
-            },
+            "input": input_ctx,
             "selection": {
                 "goal_matched_templates": selected_names,
                 "chosen_template_name": template_name,

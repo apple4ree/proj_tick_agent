@@ -12,6 +12,13 @@ from ..schemas.plan_schema import StrategyPlan
 
 logger = logging.getLogger(__name__)
 
+_SHORT_HORIZON_HOLDING_TICKS = 30
+_SHORT_STYLE_HINTS: frozenset[str] = frozenset({
+    "momentum",
+    "scalping",
+    "execution_adaptive",
+})
+
 
 class PlanParseError(ValueError):
     """Raised when the OpenAI response fails to parse into StrategyPlan."""
@@ -96,6 +103,28 @@ def validate_plan(plan: StrategyPlan) -> list[str]:
                         f"State event '{event.name}' updates undefined var '{upd.var}'"
                     )
 
+    holding_horizon = _infer_holding_horizon_ticks(plan)
+    style_hint = str(plan.strategy_style or "").strip().lower()
+    style_short_horizon = style_hint in _SHORT_STYLE_HINTS
+    fast_entry_cooldown = any(0 < ep.cooldown_ticks <= _SHORT_HORIZON_HOLDING_TICKS for ep in plan.entry_policies)
+
+    if plan.execution_policy is None:
+        if holding_horizon is not None and holding_horizon <= _SHORT_HORIZON_HOLDING_TICKS:
+            warnings.append(
+                "Short-horizon plan has no execution_policy; static review may treat this as unsafe "
+                f"(holding_ticks={holding_horizon}, threshold={_SHORT_HORIZON_HOLDING_TICKS})"
+            )
+        elif style_short_horizon and holding_horizon is None:
+            warnings.append(
+                f"strategy_style='{style_hint}' with no explicit holding_ticks exit and no execution_policy; "
+                "add explicit placement_mode, cancel_after_ticks, and max_reprices"
+            )
+        elif fast_entry_cooldown and holding_horizon is None:
+            warnings.append(
+                "Fast entry cadence without holding_ticks horizon and no execution_policy; "
+                "explicit execution controls are recommended"
+            )
+
     return warnings
 
 
@@ -173,3 +202,20 @@ def _check_condition_state_refs(
             _check_condition_state_refs(child, defined_vars, warnings, context)
     if cond.persist_condition:
         _check_condition_state_refs(cond.persist_condition, defined_vars, warnings, context)
+
+
+def _infer_holding_horizon_ticks(plan: StrategyPlan) -> int | None:
+    """Infer smallest holding_ticks threshold from close-all time exits."""
+    inferred: int | None = None
+    for xp in plan.exit_policies:
+        for rule in xp.rules:
+            cond = rule.condition
+            if (
+                cond.position_attr == "holding_ticks"
+                and cond.op in {">=", ">"}
+                and cond.threshold is not None
+            ):
+                threshold = int(cond.threshold)
+                if inferred is None or threshold < inferred:
+                    inferred = threshold
+    return inferred

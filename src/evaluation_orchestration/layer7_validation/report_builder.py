@@ -252,6 +252,7 @@ class ReportBuilder:
             _mod = importlib.util.module_from_spec(_spec)  # type: ignore[arg-type]
             _spec.loader.exec_module(_mod)  # type: ignore[union-attr]
             paths = _mod.generate_all_plots(run_dir, show=False)
-            logger.info("Generated %d plots in %s", len(paths), run_dir / "plots")
+            plot_names = ", ".join(Path(p).name for p in paths)
+            logger.info("Generated %d plots in %s [%s]", len(paths), run_dir / "plots", plot_names)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Plot generation skipped: %s", exc)

@@ -1,0 +1,19 @@
+{
+  "overall_assessment": "pass_with_notes",
+  "summary": "Static review passed; only minor semantic notes were found.",
+  "issues": [
+    {
+      "severity": "info",
+      "category": "semantic_review",
+      "description": "No critical semantic risks detected in mock review mode.",
+      "rationale": "Static reviewer passed without warning-level blockers.",
+      "suggested_fix": "Keep validating with out-of-sample backtests."
+    }
+  ],
+  "repair_recommended": false,
+  "focus_areas": [
+    "semantic_review",
+    "execution_policy",
+    "risk_policy"
+  ]
+}

@@ -21,8 +21,16 @@ Review categories:
 18. state_event_order_risk            (Phase 3 stabilization)
 19. execution_override_conflict       (Phase 3 stabilization)
 20. regime_exit_coverage              (Phase 3 stabilization)
+21. execution_policy_too_aggressive   (churn suppression)
+22. churn_risk_high                   (churn suppression)
+23. missing_robust_exit_for_short_horizon (churn suppression)
+24. queue_latency_mismatch            (churn suppression)
+25. missing_execution_policy_for_short_horizon (churn suppression)
+26. execution_policy_implicit_risk     (churn suppression)
 """
 from __future__ import annotations
+
+from typing import Any
 
 from strategy_block.strategy_specs.v2.schema_v2 import (
     StrategySpecV2,
@@ -52,7 +60,11 @@ from strategy_block.strategy_review.review_common import (
 class StrategyReviewerV2:
     """Rule-based reviewer for StrategySpecV2."""
 
-    def review(self, spec: StrategySpecV2) -> ReviewResult:
+    def review(
+        self,
+        spec: StrategySpecV2,
+        backtest_environment: dict[str, Any] | None = None,
+    ) -> ReviewResult:
         issues: list[ReviewIssue] = []
 
         # Phase 1 checks
@@ -69,6 +81,9 @@ class StrategyReviewerV2:
         self._check_regime_reference_integrity(spec, issues)
         self._check_execution_risk_mismatch(spec, issues)
         self._check_latency_structure_warning(spec, issues)
+
+        # Execution policy churn checks
+        self._check_execution_policy_churn(spec, issues, backtest_environment)
 
         # Phase 3 checks
         self._check_state_reference_integrity(spec, issues)
@@ -1074,3 +1089,442 @@ class StrategyReviewerV2:
                 description="Strong entry throttles are present but no holding_ticks-based time exit was found",
                 suggestion="Consider adding position_attr holding_ticks time exit",
             ))
+
+    # ── Execution-policy churn checks ─────────────────────────────────
+
+    # Execution budget constants (internal reviewer policy — not spec schema)
+    _SHORT_HORIZON_THRESHOLD: int = 30
+    _SHORT_HORIZON_THRESHOLD_MS: float = 30_000.0
+    _AGGRESSIVE_CANCEL_HORIZON_MS: float = 3_000.0
+    _MIN_CANCEL_AFTER_TICKS_SHORT: int = 5
+    _MAX_REPRICES_SHORT: int = 3
+    _MAX_REPRICES_GENERAL: int = 10
+    _HIGH_SUBMIT_TO_TICK_RATIO: float = 0.50
+    _HIGH_CANCEL_TO_TICK_RATIO: float = 0.40
+    _HIGH_TOTAL_LATENCY_TO_TICK_RATIO: float = 0.80
+    _PASSIVE_MODES: frozenset[str] = frozenset({
+        "passive_join", "passive_only", "passive_aggressive",
+    })
+    _SHORT_HORIZON_STYLE_HINTS: frozenset[str] = frozenset({
+        "momentum", "scalping", "execution_adaptive",
+    })
+    _MICROSTRUCTURE_SENSITIVE_FEATURES: frozenset[str] = frozenset({
+        "order_imbalance",
+        "depth_imbalance",
+        "spread_bps",
+        "trade_imbalance",
+        "book_pressure",
+        "queue_imbalance",
+        "microprice_deviation_bps",
+        "top_level_imbalance",
+    })
+
+    def _to_float(self, value: Any) -> float | None:
+        try:
+            if value is None:
+                return None
+            result = float(value)
+            return result
+        except (TypeError, ValueError):
+            return None
+
+    def _canonical_tick_interval_ms(
+        self,
+        backtest_environment: dict[str, Any] | None,
+    ) -> float | None:
+        if not backtest_environment:
+            return None
+        tick_ms = self._to_float(backtest_environment.get("canonical_tick_interval_ms"))
+        if tick_ms is None or tick_ms <= 0.0:
+            return None
+        return tick_ms
+
+    def tick_to_ms(
+        self,
+        ticks: float | int | None,
+        backtest_environment: dict[str, Any] | None,
+    ) -> float | None:
+        tick_ms = self._canonical_tick_interval_ms(backtest_environment)
+        if tick_ms is None or ticks is None:
+            return None
+        return float(ticks) * tick_ms
+
+    def holding_horizon_ms(
+        self,
+        spec: StrategySpecV2,
+        backtest_environment: dict[str, Any] | None,
+    ) -> float | None:
+        horizon = self._infer_holding_horizon(spec)
+        return self.tick_to_ms(horizon, backtest_environment)
+
+    def cancel_horizon_ms(
+        self,
+        xp: ExecutionPolicyV2,
+        backtest_environment: dict[str, Any] | None,
+    ) -> float | None:
+        return self.tick_to_ms(xp.cancel_after_ticks, backtest_environment)
+
+    def submit_to_tick_ratio(
+        self,
+        backtest_environment: dict[str, Any] | None,
+    ) -> float | None:
+        tick_ms = self._canonical_tick_interval_ms(backtest_environment)
+        if tick_ms is None:
+            return None
+        latency = dict((backtest_environment or {}).get("latency") or {})
+        submit_ms = self._to_float(latency.get("order_submit_ms"))
+        if submit_ms is None:
+            return None
+        return submit_ms / tick_ms
+
+    def cancel_to_tick_ratio(
+        self,
+        backtest_environment: dict[str, Any] | None,
+    ) -> float | None:
+        tick_ms = self._canonical_tick_interval_ms(backtest_environment)
+        if tick_ms is None:
+            return None
+        latency = dict((backtest_environment or {}).get("latency") or {})
+        cancel_ms = self._to_float(latency.get("cancel_ms"))
+        if cancel_ms is None:
+            return None
+        return cancel_ms / tick_ms
+
+    def _fmt_ms(self, value: float | None) -> str:
+        if value is None:
+            return "unknown"
+        if abs(value - round(value)) < 1e-9:
+            return str(int(round(value)))
+        return f"{value:.1f}"
+
+    def _describe_horizon(
+        self,
+        *,
+        horizon_ticks: int | None,
+        horizon_ms: float | None,
+        resample: str,
+    ) -> str:
+        if horizon_ticks is None and horizon_ms is None:
+            return "unknown"
+        if horizon_ticks is not None and horizon_ms is not None:
+            return (
+                f"holding≤{horizon_ticks} ticks (~{self._fmt_ms(horizon_ms)}ms "
+                f"at {resample} cadence)"
+            )
+        if horizon_ticks is not None:
+            return f"holding≤{horizon_ticks} ticks"
+        return f"~{self._fmt_ms(horizon_ms)}ms at {resample} cadence"
+
+    def _check_execution_policy_churn(
+        self,
+        spec: StrategySpecV2,
+        issues: list[ReviewIssue],
+        backtest_environment: dict[str, Any] | None = None,
+    ) -> None:
+        """Deterministic hard-gate and high-risk checks for churn-heavy execution policies."""
+        env = dict(backtest_environment or {})
+        latency = dict(env.get("latency") or {})
+        queue = dict(env.get("queue") or {})
+        semantics = dict(env.get("semantics") or {})
+
+        resample = str(env.get("resample", "unknown"))
+        tick_ms = self._canonical_tick_interval_ms(env)
+        submit_ratio = self.submit_to_tick_ratio(env)
+        cancel_ratio = self.cancel_to_tick_ratio(env)
+        combined_ratio: float | None = None
+        if submit_ratio is not None and cancel_ratio is not None:
+            combined_ratio = submit_ratio + cancel_ratio
+
+        queue_model = str(queue.get("queue_model", "unknown"))
+        replace_model = str(semantics.get("replace_model", "unknown"))
+        market_data_delay_ms = self._to_float(env.get("market_data_delay_ms"))
+        decision_compute_ms = self._to_float(env.get("decision_compute_ms"))
+        effective_delay_ms = self._to_float(env.get("effective_delay_ms"))
+        order_submit_ms = self._to_float(latency.get("order_submit_ms"))
+        cancel_ms = self._to_float(latency.get("cancel_ms"))
+
+        ratio_bits: list[str] = []
+        if submit_ratio is not None:
+            ratio_bits.append(f"submit/tick={submit_ratio:.2f}")
+        if cancel_ratio is not None:
+            ratio_bits.append(f"cancel/tick={cancel_ratio:.2f}")
+        if combined_ratio is not None:
+            ratio_bits.append(f"submit+cancel/tick={combined_ratio:.2f}")
+        ratio_text = f" ({'; '.join(ratio_bits)})" if ratio_bits else ""
+
+        latency_context_bits: list[str] = []
+        if order_submit_ms is not None:
+            latency_context_bits.append(f"submit_ms={self._fmt_ms(order_submit_ms)}")
+        if cancel_ms is not None:
+            latency_context_bits.append(f"cancel_ms={self._fmt_ms(cancel_ms)}")
+        if market_data_delay_ms is not None:
+            latency_context_bits.append(f"market_data_delay_ms={self._fmt_ms(market_data_delay_ms)}")
+        if decision_compute_ms is not None:
+            latency_context_bits.append(f"decision_compute_ms={self._fmt_ms(decision_compute_ms)}")
+        if effective_delay_ms is not None:
+            latency_context_bits.append(f"effective_delay_ms={self._fmt_ms(effective_delay_ms)}")
+        env_context = ", ".join(latency_context_bits)
+        if env_context:
+            env_context = f"; env[{env_context}, queue_model={queue_model}, replace_model={replace_model}]"
+        else:
+            env_context = f"; env[queue_model={queue_model}, replace_model={replace_model}]"
+
+        horizon_ticks = self._infer_holding_horizon(spec)
+        horizon_ms = self.holding_horizon_ms(spec, env)
+        short_by_ticks = horizon_ticks is not None and horizon_ticks <= self._SHORT_HORIZON_THRESHOLD
+        short_by_ms = horizon_ms is not None and horizon_ms <= self._SHORT_HORIZON_THRESHOLD_MS
+        is_short_horizon = short_by_ticks or short_by_ms
+        horizon_desc = self._describe_horizon(
+            horizon_ticks=horizon_ticks,
+            horizon_ms=horizon_ms,
+            resample=resample,
+        )
+
+        xp = spec.execution_policy
+
+        # ── Missing execution policy checks ───────────────────────────
+        if xp is None:
+            style_short_hint = self._style_short_horizon_hint(spec)
+            microstructure_sensitive = self._is_microstructure_sensitive(spec)
+            fast_entry_cadence = self._has_fast_entry_cadence(spec, env)
+
+            if is_short_horizon:
+                issues.append(ReviewIssue(
+                    severity="error",
+                    category="missing_execution_policy_for_short_horizon",
+                    description=(
+                        f"Short horizon ({horizon_desc}) but no explicit execution_policy — "
+                        f"strategy relies on engine defaults under cadence/latency/queue friction"
+                        f"{ratio_text}{env_context}"
+                    ),
+                    suggestion=(
+                        "Add an explicit execution_policy with conservative defaults: "
+                        "placement_mode='passive_join', cancel_after_ticks=10-20, "
+                        "max_reprices=2-3"
+                    ),
+                ))
+            elif horizon_ticks is not None or horizon_ms is not None:
+                issues.append(ReviewIssue(
+                    severity="warning",
+                    category="execution_policy_implicit_risk",
+                    description=(
+                        f"No explicit execution_policy for time-bounded strategy ({horizon_desc}) — "
+                        f"placement/cancel/repricing behavior is left to engine defaults{ratio_text}"
+                    ),
+                    suggestion=(
+                        "Add explicit execution_policy controls for placement_mode, "
+                        "cancel_after_ticks, and max_reprices"
+                    ),
+                ))
+            elif microstructure_sensitive and (style_short_hint or fast_entry_cadence):
+                issues.append(ReviewIssue(
+                    severity="error",
+                    category="missing_execution_policy_for_short_horizon",
+                    description=(
+                        "No explicit holding_ticks horizon, but strategy appears short-horizon "
+                        "(microstructure-sensitive entries + short-horizon style/cadence hints) and "
+                        f"execution_policy is missing{ratio_text}{env_context}"
+                    ),
+                    suggestion=(
+                        "Add explicit execution_policy controls: placement_mode, cancel_after_ticks, "
+                        "and max_reprices (conservative defaults recommended)"
+                    ),
+                ))
+            elif microstructure_sensitive:
+                issues.append(ReviewIssue(
+                    severity="warning",
+                    category="execution_policy_implicit_risk",
+                    description=(
+                        "Microstructure-sensitive strategy has no explicit execution_policy; "
+                        "engine defaults may under-model execution friction for this alpha"
+                        f"{ratio_text}"
+                    ),
+                    suggestion=(
+                        "Add explicit execution_policy with bounded cancel_after_ticks/max_reprices"
+                    ),
+                ))
+            return
+
+        is_passive = xp.placement_mode in self._PASSIVE_MODES
+        has_robust_exit = self._has_robust_close_all(spec)
+        cancel_horizon_ms = self.cancel_horizon_ms(xp, env)
+
+        high_latency_ratio = False
+        if submit_ratio is not None and submit_ratio >= self._HIGH_SUBMIT_TO_TICK_RATIO:
+            high_latency_ratio = True
+        if cancel_ratio is not None and cancel_ratio >= self._HIGH_CANCEL_TO_TICK_RATIO:
+            high_latency_ratio = True
+        if combined_ratio is not None and combined_ratio >= self._HIGH_TOTAL_LATENCY_TO_TICK_RATIO:
+            high_latency_ratio = True
+
+        effective_short_max_reprices = self._MAX_REPRICES_SHORT
+        if high_latency_ratio:
+            effective_short_max_reprices = max(1, self._MAX_REPRICES_SHORT - 1)
+
+        # Rule 1: short-horizon + aggressive passive execution → error
+        if is_short_horizon and is_passive and xp.max_reprices > effective_short_max_reprices:
+            issues.append(ReviewIssue(
+                severity="error",
+                category="execution_policy_too_aggressive",
+                description=(
+                    f"Short horizon ({horizon_desc}) with passive placement '{xp.placement_mode}' "
+                    f"and max_reprices={xp.max_reprices} exceeds env-aware budget "
+                    f"(allowed≤{effective_short_max_reprices}){ratio_text}{env_context}"
+                ),
+                suggestion=(
+                    f"Reduce max_reprices to ≤{effective_short_max_reprices} "
+                    f"or switch to a less churn-sensitive placement mode"
+                ),
+            ))
+
+        # Rule 2: cancel_after_ticks too short for short-horizon passive
+        cancel_short_by_ticks = 0 < xp.cancel_after_ticks < self._MIN_CANCEL_AFTER_TICKS_SHORT
+        cancel_short_by_ms = (
+            cancel_horizon_ms is not None
+            and xp.cancel_after_ticks > 0
+            and cancel_horizon_ms < self._AGGRESSIVE_CANCEL_HORIZON_MS
+        )
+        if is_short_horizon and is_passive and (cancel_short_by_ticks or cancel_short_by_ms):
+            cancel_ms_text = self._fmt_ms(cancel_horizon_ms)
+            issues.append(ReviewIssue(
+                severity="error",
+                category="churn_risk_high",
+                description=(
+                    f"cancel_after_ticks={xp.cancel_after_ticks} (~{cancel_ms_text}ms at {resample} cadence) "
+                    f"is too short for short-horizon passive strategy ({horizon_desc}) — "
+                    f"orders are likely cancelled before queue fill opportunity{ratio_text}{env_context}"
+                ),
+                suggestion=(
+                    f"Increase cancel_after_ticks so cancel horizon is >= {int(self._AGGRESSIVE_CANCEL_HORIZON_MS)}ms "
+                    f"and at least {self._MIN_CANCEL_AFTER_TICKS_SHORT} ticks for passive modes"
+                ),
+            ))
+
+        # Rule 3: general max_reprices too large
+        if xp.max_reprices > self._MAX_REPRICES_GENERAL:
+            issues.append(ReviewIssue(
+                severity="warning",
+                category="churn_risk_high",
+                description=(
+                    f"max_reprices={xp.max_reprices} is excessively large — "
+                    f"each reprice resets queue position and incurs submit/cancel latency{ratio_text}"
+                ),
+                suggestion=(
+                    f"Reduce max_reprices to ≤{self._MAX_REPRICES_GENERAL} "
+                    f"to limit execution churn"
+                ),
+            ))
+
+        # Rule 4: short-horizon without robust exit → error
+        if is_short_horizon and not has_robust_exit:
+            issues.append(ReviewIssue(
+                severity="error",
+                category="missing_robust_exit_for_short_horizon",
+                description=(
+                    f"Short horizon ({horizon_desc}) but no robust close_all fail-safe "
+                    f"(stop-loss or time exit) — positions may become trapped"
+                ),
+                suggestion=(
+                    "Add a stop-loss on unrealized_pnl_bps and/or "
+                    "a time exit on holding_ticks"
+                ),
+            ))
+
+        # Rule 5: passive mode with cancel_after_ticks=0 (infinite) → warning
+        if is_passive and xp.cancel_after_ticks == 0:
+            issues.append(ReviewIssue(
+                severity="warning",
+                category="queue_latency_mismatch",
+                description=(
+                    f"Passive placement '{xp.placement_mode}' with cancel_after_ticks=0 (no timeout) "
+                    f"can leave stale orders in queue indefinitely{env_context}"
+                ),
+                suggestion="Set a finite cancel_after_ticks to bound order lifetime",
+            ))
+
+        # Rule 6: horizon ultra-short + passive + repricing → error
+        ultra_short = (
+            (horizon_ticks is not None and horizon_ticks <= 3)
+            or (horizon_ms is not None and horizon_ms <= 1_500.0)
+        )
+        if ultra_short and is_passive and xp.max_reprices > 1:
+            issues.append(ReviewIssue(
+                severity="error",
+                category="execution_policy_too_aggressive",
+                description=(
+                    f"Ultra-short horizon ({horizon_desc}) with passive repricing "
+                    f"(max_reprices={xp.max_reprices}) leaves almost no queue dwell time between reprices"
+                    f"{ratio_text}"
+                ),
+                suggestion=(
+                    "For ultra-short horizons, use immediate/aggressive placement "
+                    "or set max_reprices=0-1"
+                ),
+            ))
+
+        # Rule 7: latency-to-tick ratio is high → tighten passive repricing tolerance
+        if (
+            is_short_horizon
+            and is_passive
+            and high_latency_ratio
+            and 1 < xp.max_reprices <= effective_short_max_reprices
+        ):
+            issues.append(ReviewIssue(
+                severity="warning",
+                category="churn_risk_high",
+                description=(
+                    f"Short-horizon passive strategy uses max_reprices={xp.max_reprices} in a high latency/tick "
+                    f"environment{ratio_text}; churn cost may dominate edge"
+                ),
+                suggestion=(
+                    "Prefer lower repricing budget (e.g., 1-2), longer cancel horizon, "
+                    "and stronger time/stop exits"
+                ),
+            ))
+
+    def _style_short_horizon_hint(self, spec: StrategySpecV2) -> bool:
+        meta = dict(spec.metadata or {})
+        for key in ("strategy_style", "plan_style"):
+            raw = meta.get(key)
+            if isinstance(raw, str) and raw.strip().lower() in self._SHORT_HORIZON_STYLE_HINTS:
+                return True
+        return False
+
+    def _has_fast_entry_cadence(
+        self,
+        spec: StrategySpecV2,
+        backtest_environment: dict[str, Any] | None = None,
+    ) -> bool:
+        for ep in spec.entry_policies:
+            cooldown = int(ep.constraints.cooldown_ticks)
+            if 0 < cooldown <= self._SHORT_HORIZON_THRESHOLD:
+                return True
+            cooldown_ms = self.tick_to_ms(cooldown, backtest_environment)
+            if cooldown_ms is not None and 0 < cooldown_ms <= self._SHORT_HORIZON_THRESHOLD_MS:
+                return True
+        return False
+
+    def _is_microstructure_sensitive(self, spec: StrategySpecV2) -> bool:
+        features = spec.collect_all_features()
+        return bool(features & self._MICROSTRUCTURE_SENSITIVE_FEATURES)
+
+    def _infer_holding_horizon(self, spec: StrategySpecV2) -> int | None:
+        """Infer the expected holding horizon from time-exit thresholds.
+
+        Returns the smallest holding_ticks threshold found in exit rules,
+        or None if no time-exit exists.
+        """
+        min_horizon: int | None = None
+        for xp in spec.exit_policies:
+            for rule in xp.rules:
+                cond = rule.condition
+                if (
+                    isinstance(cond, ComparisonExpr)
+                    and isinstance(cond.left, PositionAttrExpr)
+                    and cond.left.name == "holding_ticks"
+                    and cond.op in {">=", ">"}
+                ):
+                    val = int(cond.threshold)
+                    if min_horizon is None or val < min_horizon:
+                        min_horizon = val
+        return min_horizon

@@ -230,7 +230,12 @@ class ExecutionAdaptationPlan(BaseModel):
 
 
 class ExecutionPlan(BaseModel):
-    """Execution policy plan."""
+    """Execution policy plan.
+
+    For short-horizon strategies, do not omit execution_policy.
+    Explicitly specify placement_mode, cancel_after_ticks, and max_reprices
+    when the strategy relies on short holding horizons or passive execution.
+    """
     placement_mode: str = "passive_join"  # "passive_join" | "aggressive_cross" | "adaptive"
     cancel_after_ticks: int = 0
     max_reprices: int = 0
@@ -341,7 +346,16 @@ class StrategyPlan(BaseModel):
         ),
     )
     risk_policy: RiskPlan = Field(default_factory=RiskPlan)
-    execution_policy: ExecutionPlan | None = None
+    execution_policy: ExecutionPlan | None = Field(
+        default=None,
+        description=(
+            "Execution policy with placement_mode, cancel_after_ticks, max_reprices. "
+            "For short-horizon strategies, do not omit execution_policy. "
+            "Explicitly specify placement_mode, cancel_after_ticks, and max_reprices when the strategy "
+            "relies on short holding horizons or passive execution. "
+            "A strategy without an explicit execution policy may be treated as unsafe in review."
+        ),
+    )
     regimes: list[RegimePlan] = Field(default_factory=list)
     state_policy: StatePlan | None = None
 

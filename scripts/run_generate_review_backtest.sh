@@ -20,7 +20,7 @@
 #   ./scripts/run_generate_review_backtest.sh \
 #       --goal "spread mean reversion" \
 #       --symbol 005930 --start-date 2026-03-13 \
-#       --backend openai --mode mock
+#       --backend openai
 # ──────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -40,8 +40,6 @@ UNIVERSE=false
 PROFILE=""
 CONFIG=""
 BACKEND=""
-MODE=""
-AUTO_APPROVE=false
 
 # ── Argument parsing ─────────────────────────────────────────────────
 usage() {
@@ -67,8 +65,6 @@ Optional:
   --profile <name>      Config profile (dev, smoke, prod)
   --config <path>       YAML override config file
   --backend <type>      Generation backend (template | openai)
-  --mode <type>         OpenAI mode (live | mock | replay)
-  --auto-approve        Auto-approve generated spec
   -h, --help            Show this help message
 EOF
     exit 0
@@ -88,8 +84,6 @@ while [[ $# -gt 0 ]]; do
         --profile)     PROFILE="$2"; shift 2 ;;
         --config)      CONFIG="$2"; shift 2 ;;
         --backend)     BACKEND="$2"; shift 2 ;;
-        --mode)        MODE="$2"; shift 2 ;;
-        --auto-approve) AUTO_APPROVE=true; shift ;;
         -h|--help)     usage ;;
         *)
             echo "ERROR: Unknown argument: $1" >&2
@@ -115,14 +109,8 @@ if [[ -z "${START_DATE}" ]]; then
     exit 1
 fi
 
-# ── OpenAI env check ─────────────────────────────────────────────────
-if [[ "${BACKEND}" == "openai" && "${MODE}" == "live" ]]; then
-    : "${OPENAI_API_KEY:?OPENAI_API_KEY is required for backend=openai, mode=live}"
-fi
-
 # ── Build CLI fragments ──────────────────────────────────────────────
 GEN_ARGS=( --goal "${GOAL}" --direct )
-REVIEW_ARGS=()
 BT_ARGS=( --start-date "${START_DATE}" )
 
 if [[ -n "${PROFILE}" ]]; then
@@ -135,12 +123,6 @@ if [[ -n "${CONFIG}" ]]; then
 fi
 if [[ -n "${BACKEND}" ]]; then
     GEN_ARGS+=( --backend "${BACKEND}" )
-fi
-if [[ -n "${MODE}" ]]; then
-    GEN_ARGS+=( --mode "${MODE}" )
-fi
-if [[ "${AUTO_APPROVE}" == true ]]; then
-    GEN_ARGS+=( --auto-approve )
 fi
 if [[ -n "${END_DATE}" ]]; then
     BT_ARGS+=( --end-date "${END_DATE}" )
@@ -159,7 +141,6 @@ fi
 echo "  start-date: ${START_DATE}"
 [[ -n "${END_DATE}" ]] && echo "  end-date:   ${END_DATE}"
 [[ -n "${BACKEND}" ]] && echo "  backend:    ${BACKEND}"
-[[ -n "${MODE}" ]]    && echo "  mode:       ${MODE}"
 echo "================================================================"
 echo ""
 

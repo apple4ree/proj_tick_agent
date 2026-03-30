@@ -106,6 +106,28 @@ class TestUserPromptContent:
             research_goal="test momentum",
             strategy_style="auto",
             latency_ms=1.0,
+            backtest_environment={
+                "resample": "500ms",
+                "canonical_tick_interval_ms": 500.0,
+                "market_data_delay_ms": 200.0,
+                "decision_compute_ms": 50.0,
+                "effective_delay_ms": 250.0,
+                "latency": {
+                    "order_submit_ms": 5.0,
+                    "order_ack_ms": 15.0,
+                    "cancel_ms": 3.0,
+                    "order_ack_used_for_fill_gating": False,
+                },
+                "queue": {
+                    "queue_model": "risk_adverse",
+                    "queue_position_assumption": 0.5,
+                },
+                "semantics": {
+                    "submit_latency_gating": True,
+                    "cancel_latency_gating": True,
+                    "replace_model": "minimal_immediate",
+                },
+            },
         )
 
     def test_exit_policy_requirements_present(self):
@@ -119,6 +141,36 @@ class TestUserPromptContent:
         assert "{research_goal}" not in self.prompt
         assert "{strategy_style}" not in self.prompt
         assert "{latency_ms}" not in self.prompt
+        assert "{backtest_environment_block}" not in self.prompt
+
+    def test_backtest_environment_context_present(self):
+        assert "Backtest constraint summary (canonical)" in self.prompt
+        assert "resample=500ms" in self.prompt
+        assert "canonical_tick_interval_ms=500" in self.prompt
+        assert "tick = resample step" in self.prompt
+        assert "market_data_delay_ms=200" in self.prompt
+        assert "decision_compute_ms=50" in self.prompt
+        assert "effective_delay_ms=250" in self.prompt
+        assert "order_submit_ms=5" in self.prompt
+        assert "order_ack_ms=15" in self.prompt
+        assert "cancel_ms=3" in self.prompt
+        assert "queue_model=risk_adverse" in self.prompt
+        assert "queue_position_assumption=0.5" in self.prompt
+        assert "order_ack_used_for_fill_gating=False" in self.prompt
+
+    def test_backtest_aware_guidance_present(self):
+        assert "tick-based parameters" in self.prompt
+        assert "queue waiting" in self.prompt
+        assert "minimal-immediate replace semantics" in self.prompt
+        assert "passive fills require queue waiting" in self.prompt
+        assert "repricing resets queue position" in self.prompt
+        assert "submit/cancel latency compounds churn cost" in self.prompt
+
+    def test_user_prompt_has_explicit_execution_policy_short_horizon_phrases(self):
+        lower = self.prompt.lower()
+        assert "for short-horizon strategies, do not omit execution_policy." in lower
+        assert "explicitly specify placement_mode, cancel_after_ticks, and max_reprices" in lower
+        assert "may be treated as unsafe in review" in lower
 
 
 # ===================================================================
@@ -168,6 +220,17 @@ class TestSchemaDescriptions:
         desc = _get_field_description(schema, "exit_policies")
         assert desc is not None
         assert "close_all" in desc or "position_attr" in desc
+
+    def test_strategy_plan_execution_policy_description_mentions_unsafe_review(self):
+        schema = StrategyPlan.model_json_schema()
+        desc = _get_field_description(schema, "execution_policy")
+        assert desc is not None
+        lowered = desc.lower()
+        assert "do not omit execution_policy" in lowered
+        assert "placement_mode" in lowered
+        assert "cancel_after_ticks" in lowered
+        assert "max_reprices" in lowered
+        assert "unsafe" in lowered
 
 
 def _get_field_description(schema: dict, field_name: str) -> str | None:
@@ -327,8 +390,13 @@ class TestPipelineCompatibility:
             research_goal="test",
             strategy_style="momentum",
             latency_ms=1.0,
+            backtest_environment={
+                "resample": "1s",
+                "canonical_tick_interval_ms": 1000.0,
+            },
         )
         assert "{research_goal}" not in user
         assert "{strategy_style}" not in user
         assert "{latency_ms}" not in user
         assert "{constraints}" not in user
+        assert "{backtest_environment_block}" not in user

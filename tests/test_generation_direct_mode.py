@@ -65,9 +65,6 @@ def _run_direct_with_config(tmp_path: Path, extra_paths: dict | None = None) -> 
     args = argparse.Namespace(
         goal="order imbalance alpha",
         backend=None,
-        mode=None,
-        model=None,
-        auto_approve=None,
         config=None,
         profile=None,
         direct=True,
@@ -142,6 +139,8 @@ class TestDirectModeCanonicalPaths:
         # Validate it's valid JSON
         data = json.loads(trace_files[0].read_text())
         assert "generation_outcome" in data
+        assert data["input"]["backtest_environment"]["resample"] == "1s"
+        assert data["input"]["backtest_environment"]["latency"]["order_submit_ms"] == 0.3
 
     def test_spec_content_is_valid(self, tmp_path: Path):
         """Generated spec is a valid canonical v2 StrategySpec JSON."""

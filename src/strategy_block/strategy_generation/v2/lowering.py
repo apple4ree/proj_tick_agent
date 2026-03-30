@@ -579,6 +579,39 @@ def _lower_plan_state(sp: Any) -> StatePolicyV2:
     )
 
 
+_SHORT_HORIZON_THRESHOLD_TICKS = 30
+_SHORT_HORIZON_STYLE_HINTS: frozenset[str] = frozenset({
+    "momentum",
+    "scalping",
+    "execution_adaptive",
+})
+
+
+def _infer_plan_holding_horizon_ticks(plan: Any) -> int | None:
+    inferred: int | None = None
+    for xp in plan.exit_policies:
+        for rule in xp.rules:
+            cond = rule.condition
+            if (
+                cond.position_attr == "holding_ticks"
+                and cond.op in {">=", ">"}
+                and cond.threshold is not None
+            ):
+                threshold = int(cond.threshold)
+                if inferred is None or threshold < inferred:
+                    inferred = threshold
+    return inferred
+
+
+def _infer_short_horizon_from_plan(plan: Any, holding_horizon: int | None) -> bool:
+    if holding_horizon is not None:
+        return holding_horizon <= _SHORT_HORIZON_THRESHOLD_TICKS
+
+    style_hint = str(getattr(plan, "strategy_style", "") or "").strip().lower()
+    fast_entry = any(0 < ep.cooldown_ticks <= _SHORT_HORIZON_THRESHOLD_TICKS for ep in plan.entry_policies)
+    return style_hint in _SHORT_HORIZON_STYLE_HINTS and fast_entry
+
+
 def lower_plan_to_spec_v2(
     plan: Any,
     *,
@@ -618,6 +651,27 @@ def lower_plan_to_spec_v2(
     if plan.state_policy is not None:
         state_policy = _lower_plan_state(plan.state_policy)
 
+    holding_horizon = _infer_plan_holding_horizon_ticks(plan)
+    inferred_short_horizon = _infer_short_horizon_from_plan(plan, holding_horizon)
+    execution_policy_missing_short_horizon = (execution_policy is None and inferred_short_horizon)
+
+    if execution_policy_missing_short_horizon:
+        logger.warning(
+            "Plan '%s' appears short-horizon but omitted execution_policy; keeping None and marking metadata for review",
+            plan.name,
+        )
+
+    metadata: dict[str, Any] = {
+        "pipeline": "v2_openai_plan_lowering",
+        "plan_name": plan.name,
+        "plan_style": plan.strategy_style,
+        "execution_policy_explicit": execution_policy is not None,
+        "execution_policy_missing": execution_policy is None,
+        "inferred_holding_horizon_ticks": holding_horizon,
+        "inferred_short_horizon": inferred_short_horizon,
+        "execution_policy_missing_short_horizon": execution_policy_missing_short_horizon,
+    }
+
     return StrategySpecV2(
         name=plan.name,
         version="2.0",
@@ -630,9 +684,5 @@ def lower_plan_to_spec_v2(
         regimes=regimes,
         execution_policy=execution_policy,
         state_policy=state_policy,
-        metadata={
-            "pipeline": "v2_openai_plan_lowering",
-            "plan_name": plan.name,
-            "plan_style": plan.strategy_style,
-        },
+        metadata=metadata,
     )

@@ -1,70 +1,116 @@
-# strategy_review/ — v2 전략 정적 검토
+# strategy_review/ — v2 리뷰 파이프라인
 
-StrategySpecV2를 정적 규칙으로 점검하여 구조적 오류와 논리적 문제를 탐지한다. 현재 **reviewer_v2** 중심이다.
+`StrategySpecV2`를 검토하고, 필요 시 제한된 자동 수리(repair)를 수행한다.
 
-## 핵심 역할
+## Document Scope
 
-- Phase 1~3에 걸쳐 20개 체크 규칙 적용
-- Hard gate(error) vs Warning vs Info 3단계 심각도 구분
-- 생성 파이프라인의 필수 게이트 (error 시 생성 차단)
-- 알려진 피처 목록 기반 참조 검증
+이 문서는 review 계층의 **현재 canonical 동작(Tier 1)** 을 설명한다.
+freeze baseline/계약은 Tier 2 문서를 따른다.
 
-## 대표 파일
+- `docs/analysis/benchmark_freeze_protocol.md`
+- `docs/analysis/benchmark_freeze_results.md`
+- `docs/analysis/benchmark_freeze_baselines.md`
 
-| 파일 | 역할 |
-|------|------|
-| `v2/reviewer_v2.py` | `StrategyReviewerV2` — 20개 체크 규칙 구현 |
-| `review_common.py` | `ReviewIssue`, `ReviewResult`, `KNOWN_FEATURES` 공통 타입 |
+## Core Contract
 
-## Hard Gate vs Warning
+- **final hard gate는 항상 static reviewer**
+- LLM review는 semantic critique (승인권 없음)
+- repair는 structured `RepairPlan` + deterministic patcher로만 적용
+- 최종 pass/fail은 static re-review 결과
 
-| 심각도 | 동작 | 예시 |
-|--------|------|------|
-| **error** | 생성/실행 차단 | 스키마 위반, 필수 필드 누락 |
-| **warning** | 로그에 기록, 차단 안 함 | dead regime, 과도한 cooldown, 논리 모순 |
-| **info** | 참고 정보 | 미지원 피처 참조 |
+## Layered Components
 
-## 체크 규칙 (20개)
+1. Static review (`v2/reviewer_v2.py`)
+- deterministic rule set으로 schema/risk/execution-churn 검증
+- `severity=error` 존재 시 `passed=False`
 
-**Phase 1 (기본):**
-1. schema — StrategySpecV2 구조 검증
-2. expression_safety — AST 깊이 > 10 경고
-3. feature_availability — 알 수 없는 피처 참조 (info)
-4. logical_contradiction — 불가능한 조건 조합 (AND 내 충돌)
-5. unreachable_entry — cooldown > 10000 ticks 경고
-6. risk_inconsistency — inventory_cap < max_position 등
-7. exit_completeness — close_all exit 규칙 부재 경고
+2. LLM review (`v2/llm_reviewer_v2.py`)
+- 입력: spec + static review + optional env/feedback context
+- 출력: `LLMReviewReport`
 
-**Phase 2 (Regime):**
-8. dead_regime — 활성화 불가 regime 경고
-9. regime_reference_integrity — entry/exit policy 참조 존재 확인
-10. execution_risk_mismatch — execution/risk policy 호환성
-11. latency_structure_warning — latency hint 불일치
+3. Repair planning (`v2/repair_planner_v2.py`)
+- 출력: 허용 op만 포함하는 `RepairPlan`
 
-**Phase 3 (State/Degradation):**
-12. state_reference_integrity — guard/event가 정의된 변수 참조
-13. state_deadlock — guard가 모든 진입 차단 + 해제 이벤트 없음
-14. guard_conflict — 복수 guard 동시 충족 불가
-15. degradation_conflict — degradation rule 충돌
-16. exit_semantics_risk — degraded 상태에서 exit 의미
-17. position_attr_sanity — position_attr 사용 정합성
-18. state_event_order_risk — event 순서 문제 (entry before exit)
-19. execution_override_conflict — execution override 충돌
-20. regime_exit_coverage — 모든 regime의 exit 정책 커버리지
+4. Deterministic patching (`v2/patcher_v2.py`)
+- spec deepcopy 후 허용 op만 적용
+- patched spec schema/static re-review 검증
 
-## Static / Heuristic 성격
+5. Pipeline orchestration (`v2/pipeline_v2.py`)
+- static -> llm -> optional repair -> static re-review
 
-- 모든 규칙은 **코드 수준 정적 분석**이며 런타임 시뮬레이션 없이 판단
-- 일부 체크(dead_regime, logical_contradiction)는 **간단한 heuristic 분석**으로 모든 경우를 탐지하지 못할 수 있음
-- LLM 기반 soft review는 제거됨 (ADR-019). 현재 정적 규칙만 적용
+## CLI (`scripts/review_strategy.py`)
 
-## 주의사항
+Public surface:
+- positional `spec_path`
+- `--mode` (`static|llm-review|auto-repair`)
+- `--config`
+- `--profile`
 
-- `KNOWN_FEATURES`(~25종)에 없는 피처는 info로 보고되지만 차단되지 않음
-- 새 Phase의 기능 추가 시 reviewer_v2.py에 대응 체크 추가 필요
-- ReviewResult.passed는 error 심각도 이슈가 0개일 때 True
+동작:
+- `static`: static only (artifact 저장 없음)
+- `llm-review`: static + llm critique (artifact 자동 저장)
+- `auto-repair`: static + llm + repair + static re-review (artifact 자동 저장)
 
-## 관련 문서
+출력 규약:
+- `REVIEW_STATUS=PASSED|FAILED`
+- `LLM_REVIEW_RUN=true|false`
+- `REPAIR_APPLIED=true|false`
 
-- [../strategy_specs/README.md](../strategy_specs/README.md) — 검토 대상 스키마
-- [../strategy_generation/README.md](../strategy_generation/README.md) — 생성 시 자동 리뷰
+## Review Artifacts
+
+`llm-review` / `auto-repair` 모드 기본 경로:
+`<spec_dir>/<spec_stem>_review_artifacts`
+
+- `static_review.json`
+- `llm_review.json`
+- `repair_plan.json`
+- `repaired_spec.json`
+- `final_static_review.json`
+
+## Environment-Aware Deterministic Gate
+
+static reviewer는 optional `backtest_environment`를 받아 tick 기반 파라미터를 wall-clock으로 해석한다.
+
+주요 반영:
+- `canonical_tick_interval_ms`
+- `market_data_delay_ms`, `decision_compute_ms`, `effective_delay_ms`
+- `latency.order_submit_ms`, `latency.cancel_ms`
+- queue/replace semantics context
+
+결과적으로 동일 tick 값이라도 `1s` vs `500ms`, latency/tick 비율에 따라 severity가 달라질 수 있다.
+
+## Feedback-Aware Review/Repair
+
+optional recent feedback source:
+- `summary.json`
+- `realism_diagnostics.json`
+
+추출기:
+- `v2/backtest_feedback.py`
+
+원칙:
+- aggregate-only feedback 사용
+- raw CSV trace는 prompt에 주입하지 않음
+- feedback가 없으면 기존 동작 유지
+
+repair priority는 아래 failure pattern에 따라 재정렬된다.
+- `churn_heavy`
+- `queue_ineffective`
+- `cost_dominated`
+- `adverse_selection_dominated`
+
+제약:
+- patcher가 지원하는 deterministic op 범위 밖 수정 금지
+- final hard gate ownership은 static reviewer 유지
+
+## Known Limitations / Deferred Scope
+
+- full staged replace state machine은 deferred
+- deeper queue instrumentation beyond aggregate는 deferred
+- feedback loop는 aggregate-only
+- live/replay LLM 경로는 runtime/provider 상태에 따라 변동 가능 (mock baseline 권장)
+
+## Freeze Reference
+
+- `outputs/benchmarks/phase4_benchmark_freeze.json`
+- `outputs/benchmarks/phase4_benchmark_freeze.md`
