@@ -163,7 +163,7 @@ def test_summary_and_diagnostics_contract_freeze_keys_exist():
             fee_model="krx",
             impact_model="linear",
             exchange_model="partial_fill",
-            queue_model="risk_adverse",
+            queue_model="prob_queue",
             queue_position_assumption=0.5,
             market_data_delay_ms=0.0,
             decision_compute_ms=0.0,

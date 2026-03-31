@@ -69,7 +69,7 @@ def test_layer7_readme_core_artifact_contract_names_present() -> None:
     text = _read("src/evaluation_orchestration/layer7_validation/README.md")
     assert "summary.json" in text
     assert "realism_diagnostics.json" in text
-    for name in {"overview.png", "trade_timeline.png", "equity_risk.png", "realism_dashboard.png"}:
+    for name in {"dashboard.png", "intraday_cumulative_profit.png", "trade_timeline.png"}:
         assert name in text
 
 
@@ -79,3 +79,28 @@ def test_docs_index_declares_authoritative_tiers() -> None:
     assert "Tier 2" in text
     assert "Tier 3" in text
     assert "analysis/benchmark_freeze_protocol.md" in text
+
+
+def test_tests_readme_describes_current_curated_suite() -> None:
+    text = _read("tests/README.md")
+    required_phrases = {
+        "canonical pytest suite",
+        "run_validation_tiers.sh smoke",
+        "run_validation_tiers.sh stronger",
+        "Generation / review",
+        "Backtest realism",
+        "Freeze / docs contract",
+        "Walk-forward / family-aware selection",
+        "Promotion / export",
+    }
+    for phrase in required_phrases:
+        assert phrase in text
+
+    forbidden_phrases = {
+        "test_generation_v2.py",
+        "test_experiment_tracker_metrics.py",
+        "tests/archive",
+        "tests/legacy",
+    }
+    for phrase in forbidden_phrases:
+        assert phrase not in text

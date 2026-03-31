@@ -1,0 +1,130 @@
+{
+  "name": "adaptive_execution_imbalance",
+  "version": "2.0",
+  "description": "Imbalance momentum with adaptive execution: passive when spread is tight, aggressive when imbalance is very strong.",
+  "spec_format": "v2",
+  "preconditions": [
+    {
+      "name": "has_spread",
+      "condition": {
+        "type": "comparison",
+        "op": ">",
+        "threshold": 0.0,
+        "feature": "spread_bps"
+      }
+    }
+  ],
+  "entry_policies": [
+    {
+      "name": "strong_imbalance_long",
+      "side": "long",
+      "trigger": {
+        "type": "all",
+        "children": [
+          {
+            "type": "comparison",
+            "op": ">",
+            "threshold": 0.35,
+            "feature": "order_imbalance"
+          },
+          {
+            "type": "comparison",
+            "op": ">",
+            "threshold": 0.1,
+            "feature": "depth_imbalance"
+          }
+        ]
+      },
+      "strength": {
+        "type": "const",
+        "value": 0.6
+      },
+      "constraints": {
+        "cooldown_ticks": 30,
+        "no_reentry_until_flat": false
+      }
+    }
+  ],
+  "exit_policies": [
+    {
+      "name": "adaptive_exits",
+      "rules": [
+        {
+          "name": "stop_loss",
+          "priority": 1,
+          "condition": {
+            "type": "comparison",
+            "op": "<=",
+            "threshold": -25.0,
+            "left": {
+              "type": "position_attr",
+              "name": "unrealized_pnl_bps"
+            }
+          },
+          "action": {
+            "type": "close_all"
+          }
+        },
+        {
+          "name": "time_exit",
+          "priority": 2,
+          "condition": {
+            "type": "comparison",
+            "op": ">=",
+            "threshold": 80.0,
+            "left": {
+              "type": "position_attr",
+              "name": "holding_ticks"
+            }
+          },
+          "action": {
+            "type": "close_all"
+          }
+        },
+        {
+          "name": "imbalance_stop",
+          "priority": 3,
+          "condition": {
+            "type": "comparison",
+            "op": "<",
+            "threshold": -0.1,
+            "feature": "order_imbalance"
+          },
+          "action": {
+            "type": "close_all"
+          }
+        }
+      ]
+    }
+  ],
+  "risk_policy": {
+    "max_position": 400,
+    "inventory_cap": 800,
+    "position_sizing": {
+      "mode": "fixed",
+      "base_size": 100,
+      "max_size": 400
+    }
+  },
+  "regimes": [],
+  "metadata": {
+    "pipeline": "v2_template_lowering",
+    "template_name": "adaptive_execution_imbalance",
+    "research_goal": "queue depletion reversal strategy with conservative passive execution",
+    "idea_name": "adaptive_execution_imbalance",
+    "latency_ms": 1.0,
+    "spec_canonical": "v2",
+    "generated_at": "2026-03-31T01:05:34.204070+00:00"
+  },
+  "execution_policy": {
+    "placement_mode": "adaptive",
+    "cancel_after_ticks": 20,
+    "max_reprices": 3,
+    "do_not_trade_when": {
+      "type": "comparison",
+      "op": ">",
+      "threshold": 50.0,
+      "feature": "spread_bps"
+    }
+  }
+}

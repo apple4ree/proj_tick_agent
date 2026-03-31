@@ -1,0 +1,42 @@
+promotion:
+  gate:
+    require_walk_forward_passed: true
+    min_aggregate_score: -0.25
+    min_valid_windows: 2
+    min_forward_survival_ratio: 0.5
+    max_churn_heavy_share: 0.7
+    max_cost_dominated_share: 0.8
+    max_adverse_selection_dominated_share: 0.8
+    max_queue_ineffective_share: 0.8
+    require_family_id: true
+    require_trial_active: true
+    required_trial_stages:
+      - BACKTESTED
+      - WF_PASSED
+      - PROMOTION_CANDIDATE
+      - CONTRACT_EXPORTED
+      - HANDOFF_READY
+    required_trial_metadata: []
+
+  contract:
+    allowed_symbols_default: []
+    universe_symbol_token: __universe__
+    tick_seconds_default: 1.0
+    required_monitoring_metrics:
+      - aggregate_score
+      - children_per_parent
+      - cancel_rate
+      - maker_fill_ratio
+      - adverse_selection_share
+      - total_commission
+      - total_slippage
+      - total_impact
+    required_disable_conditions:
+      - disable_if_aggregate_score_below_gate
+      - disable_if_churn_heavy_share_above_gate
+      - disable_if_cost_dominated_share_above_gate
+
+  bundle:
+    output_root: outputs/promotion_reports
+    include_known_failure_modes: true
+    include_readme: true

@@ -79,16 +79,11 @@ class LatencyConfig:
 class ExchangeConfig:
     """Exchange simulation configuration.
 
-    Queue models (all handled exclusively by FillSimulator):
-      - none         : queue gate disabled, immediate fill eligibility
-      - price_time   : strict FIFO conservative; trade-only advancement
-      - risk_adverse : trade-only advancement (same decay as price_time)
-      - prob_queue   : trade + partial depth-drop credit (default)
-      - random       : trade + stochastic depth-drop credit (seed-deterministic)
-      - pro_rata     : risk_adverse gate + size-proportional fill allocation
+    Queue model (handled exclusively by FillSimulator):
+      - prob_queue : trade + partial depth-drop credit (KRX FIFO with cancel credit)
     """
     exchange_model: str = "partial_fill"        # partial_fill | no_partial_fill
-    queue_model: str = "prob_queue"             # none | price_time | risk_adverse | prob_queue | pro_rata | random
+    queue_model: str = "prob_queue"             # fixed: prob_queue only
     queue_position_assumption: float = 0.5       # Assumed queue position (0.0 = front, 1.0 = back)
 
     def to_dict(self) -> dict:
@@ -352,9 +347,9 @@ class BacktestConfig:
         # Exchange config
         if self.exchange.exchange_model not in {"partial_fill", "no_partial_fill"}:
             errors.append(f"exchange.exchange_model must be 'partial_fill' or 'no_partial_fill', got '{self.exchange.exchange_model}'")
-        valid_queue = {"none", "price_time", "risk_adverse", "prob_queue", "pro_rata", "random"}
+        valid_queue = {"prob_queue"}
         if self.exchange.queue_model not in valid_queue:
-            errors.append(f"exchange.queue_model must be one of {valid_queue}, got '{self.exchange.queue_model}'")
+            errors.append(f"exchange.queue_model must be 'prob_queue', got '{self.exchange.queue_model}'")
         if not 0.0 <= self.exchange.queue_position_assumption <= 1.0:
             errors.append(
                 "exchange.queue_position_assumption must be in [0, 1], "

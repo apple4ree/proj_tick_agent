@@ -49,7 +49,6 @@ Primary monitored metrics:
 - realism_diagnostics core sections and nested keys: fixed presence
 - review pipeline result keys: fixed presence
 - plot freeze set:
-  - `overview.png`
+  - `dashboard.png`
+  - `intraday_cumulative_profit.png`
   - `trade_timeline.png`
-  - `equity_risk.png`
-  - `realism_dashboard.png`

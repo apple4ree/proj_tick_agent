@@ -122,13 +122,13 @@ class TestBuildMatchingEngine:
         cfg = ExchangeConfig(queue_model="price_time")
         engine = ComponentFactory.build_matching_engine(cfg)
         from market_simulation.layer5_simulator.matching_engine import QueueModel
-        assert engine.queue_model == QueueModel.PRICE_TIME
+        assert engine.queue_model == QueueModel.PROB_QUEUE
 
     def test_queue_model_none(self):
         cfg = ExchangeConfig(queue_model="none")
         engine = ComponentFactory.build_matching_engine(cfg)
         from market_simulation.layer5_simulator.matching_engine import QueueModel
-        assert engine.queue_model == QueueModel.NONE
+        assert engine.queue_model == QueueModel.PROB_QUEUE
 
     def test_normalize_queue_model_unknown_defaults_prob_queue(self):
         assert ComponentFactory.normalize_queue_model("invalid") == "prob_queue"

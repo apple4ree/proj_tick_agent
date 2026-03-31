@@ -1,0 +1,152 @@
+{
+  "name": "latency_adaptive_passive_entry",
+  "version": "2.0",
+  "description": "Execution-adaptive entry hints: passive under wider spreads, aggressive when imbalance is extreme.",
+  "spec_format": "v2",
+  "preconditions": [
+    {
+      "name": "spread_valid",
+      "condition": {
+        "type": "comparison",
+        "op": ">",
+        "threshold": 0.0,
+        "feature": "spread_bps"
+      }
+    }
+  ],
+  "entry_policies": [
+    {
+      "name": "adaptive_long",
+      "side": "long",
+      "trigger": {
+        "type": "all",
+        "children": [
+          {
+            "type": "comparison",
+            "op": ">",
+            "threshold": 0.28,
+            "feature": "order_imbalance"
+          },
+          {
+            "type": "comparison",
+            "op": ">",
+            "threshold": 0.08,
+            "feature": "depth_imbalance"
+          }
+        ]
+      },
+      "strength": {
+        "type": "const",
+        "value": 0.58
+      },
+      "constraints": {
+        "cooldown_ticks": 20,
+        "no_reentry_until_flat": false
+      }
+    }
+  ],
+  "exit_policies": [
+    {
+      "name": "adaptive_passive_exits",
+      "rules": [
+        {
+          "name": "stop_loss",
+          "priority": 1,
+          "condition": {
+            "type": "comparison",
+            "op": "<=",
+            "threshold": -20.0,
+            "left": {
+              "type": "position_attr",
+              "name": "unrealized_pnl_bps"
+            }
+          },
+          "action": {
+            "type": "close_all"
+          }
+        },
+        {
+          "name": "time_exit",
+          "priority": 2,
+          "condition": {
+            "type": "comparison",
+            "op": ">=",
+            "threshold": 60.0,
+            "left": {
+              "type": "position_attr",
+              "name": "holding_ticks"
+            }
+          },
+          "action": {
+            "type": "close_all"
+          }
+        },
+        {
+          "name": "imbalance_reverse",
+          "priority": 3,
+          "condition": {
+            "type": "comparison",
+            "op": "<",
+            "threshold": -0.08,
+            "feature": "order_imbalance"
+          },
+          "action": {
+            "type": "close_all"
+          }
+        }
+      ]
+    }
+  ],
+  "risk_policy": {
+    "max_position": 380,
+    "inventory_cap": 760,
+    "position_sizing": {
+      "mode": "fixed",
+      "base_size": 100,
+      "max_size": 380
+    }
+  },
+  "regimes": [],
+  "metadata": {
+    "pipeline": "v2_template_lowering",
+    "template_name": "latency_adaptive_passive_entry",
+    "research_goal": "spread fade strategy with bounded cancel_after_ticks and low churn execution policy",
+    "idea_name": "latency_adaptive_passive_entry",
+    "latency_ms": 1.0,
+    "spec_canonical": "v2",
+    "generated_at": "2026-03-30T19:40:29.416077+00:00"
+  },
+  "execution_policy": {
+    "placement_mode": "adaptive",
+    "cancel_after_ticks": 12,
+    "max_reprices": 2,
+    "adaptation_rules": [
+      {
+        "condition": {
+          "type": "comparison",
+          "op": ">",
+          "threshold": 18.0,
+          "feature": "spread_bps"
+        },
+        "override": {
+          "placement_mode": "passive_only",
+          "cancel_after_ticks": 5,
+          "max_reprices": 1
+        }
+      },
+      {
+        "condition": {
+          "type": "comparison",
+          "op": ">",
+          "threshold": 0.6,
+          "feature": "order_imbalance"
+        },
+        "override": {
+          "placement_mode": "aggressive_cross",
+          "cancel_after_ticks": 1,
+          "max_reprices": 0
+        }
+      }
+    ]
+  }
+}

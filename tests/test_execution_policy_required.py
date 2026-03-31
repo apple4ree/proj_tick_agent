@@ -121,7 +121,7 @@ def _env_context(*, resample: str, tick_ms: float, submit_ms: float = 50.0, canc
             "order_ack_used_for_fill_gating": False,
         },
         "queue": {
-            "queue_model": "risk_adverse",
+            "queue_model": "prob_queue",
             "queue_position_assumption": 0.5,
         },
         "semantics": {

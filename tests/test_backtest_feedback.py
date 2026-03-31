@@ -24,7 +24,7 @@ def _write_feedback_artifacts(run_dir):
         "canonical_tick_interval_ms": 500.0,
         "configured_order_submit_ms": 30.0,
         "configured_cancel_ms": 20.0,
-        "queue_model": "risk_adverse",
+        "queue_model": "prob_queue",
     }
     diagnostics = {
         "lifecycle": {
@@ -37,7 +37,7 @@ def _write_feedback_artifacts(run_dir):
             "max_children_per_parent": 200.0,
         },
         "queue": {
-            "queue_model": "risk_adverse",
+            "queue_model": "prob_queue",
             "queue_blocked_count": 100.0,
             "blocked_miss_count": 90.0,
             "queue_ready_count": 5.0,
@@ -81,7 +81,7 @@ def test_load_backtest_feedback_extracts_compact_aggregate(tmp_path):
     assert feedback.lifecycle.avg_child_lifetime_seconds == 2.0
     assert feedback.lifecycle.max_children_per_parent == 200.0
 
-    assert feedback.queue.queue_model == "risk_adverse"
+    assert feedback.queue.queue_model == "prob_queue"
     assert feedback.queue.queue_blocked_count == 100.0
     assert feedback.queue.blocked_miss_count == 90.0
     assert feedback.queue.queue_ready_count == 5.0
@@ -116,7 +116,7 @@ def test_build_backtest_feedback_summary_returns_compact_human_readable_text(tmp
     rendered = build_backtest_feedback_summary(feedback)
     assert "Recent backtest feedback (aggregate-only):" in rendered
     assert "children_per_parent" in rendered
-    assert "queue_model=risk_adverse" in rendered
+    assert "queue_model=prob_queue" in rendered
     assert "adverse_selection=" in rendered
     assert "derived_flags:" in rendered
 

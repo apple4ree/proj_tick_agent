@@ -1,0 +1,17 @@
+selection:
+  walk_forward:
+    train_days: 1
+    select_days: 1
+    holdout_days: 1
+    forward_days: 1
+    step_days: 1
+    fallback_single_window: true
+  selector:
+    min_windows: 1
+    min_pass_windows: 1
+    min_window_score: -1.5
+    min_average_score: -1.0
+    max_churn_heavy_share: 1.0
+    max_cost_dominated_share: 1.0
+    max_adverse_selection_share: 1.0
+    max_score_std: 10.0

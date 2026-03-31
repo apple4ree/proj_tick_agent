@@ -27,6 +27,10 @@ Review categories:
 24. queue_latency_mismatch            (churn suppression)
 25. missing_execution_policy_for_short_horizon (churn suppression)
 26. execution_policy_implicit_risk     (churn suppression)
+27. leakage_feature_time_risk         (leakage/liveness lints)
+28. leakage_lookahead_risk            (leakage/liveness lints)
+29. leakage_fill_alignment_risk       (leakage/liveness lints)
+30. latency_feasibility_risk          (leakage/liveness lints)
 """
 from __future__ import annotations
 
@@ -55,10 +59,54 @@ from strategy_block.strategy_review.review_common import (
     ReviewIssue,
     ReviewResult,
 )
+from strategy_block.strategy_review.leakage_lints.models import LeakageLintIssue
+from strategy_block.strategy_review.leakage_lints.runner import LeakageLintRunner
 
 
 class StrategyReviewerV2:
     """Rule-based reviewer for StrategySpecV2."""
+
+    _LINT_CATEGORY_MAP: dict[str, str] = {
+        "FEATURE_TIME": "leakage_feature_time_risk",
+        "LOOKAHEAD": "leakage_lookahead_risk",
+        "FILL_ALIGNMENT": "leakage_fill_alignment_risk",
+        "LATENCY_FEASIBILITY": "latency_feasibility_risk",
+    }
+
+    def __init__(self, leakage_lint_runner: LeakageLintRunner | None = None) -> None:
+        self._leakage_lint_runner = leakage_lint_runner or LeakageLintRunner()
+
+    def _lint_category(self, lint_issue: LeakageLintIssue) -> str:
+        for prefix, category in self._LINT_CATEGORY_MAP.items():
+            if lint_issue.code.startswith(prefix):
+                return category
+        return "leakage_lint_risk"
+
+    def _append_leakage_lints(
+        self,
+        spec: StrategySpecV2,
+        issues: list[ReviewIssue],
+        backtest_environment: dict[str, Any] | None,
+    ) -> None:
+        lint_result = self._leakage_lint_runner.run(
+            spec,
+            backtest_environment=backtest_environment,
+        )
+        for lint_issue in lint_result.issues:
+            details = dict(lint_issue.details or {})
+            suggestion = str(details.pop("suggestion", ""))
+            details_text = ""
+            if details:
+                details_pairs = ", ".join(f"{k}={details[k]!r}" for k in sorted(details))
+                details_text = f" | details: {details_pairs}"
+            issues.append(
+                ReviewIssue(
+                    severity=lint_issue.severity,
+                    category=self._lint_category(lint_issue),
+                    description=f"[{lint_issue.code}] {lint_issue.message}{details_text}",
+                    suggestion=suggestion,
+                )
+            )
 
     def review(
         self,
@@ -66,6 +114,9 @@ class StrategyReviewerV2:
         backtest_environment: dict[str, Any] | None = None,
     ) -> ReviewResult:
         issues: list[ReviewIssue] = []
+
+        # Leakage/liveness lints (pre-static layer)
+        self._append_leakage_lints(spec, issues, backtest_environment)
 
         # Phase 1 checks
         self._check_schema(spec, issues)

@@ -22,6 +22,7 @@ freeze baseline/계약은 Tier 2 문서를 따른다.
 
 1. Static review (`v2/reviewer_v2.py`)
 - deterministic rule set으로 schema/risk/execution-churn 검증
+- pre-layer leakage/liveness lints를 ReviewIssue로 병합 후 hard gate 판정
 - `severity=error` 존재 시 `passed=False`
 
 2. LLM review (`v2/llm_reviewer_v2.py`)
@@ -37,6 +38,17 @@ freeze baseline/계약은 Tier 2 문서를 따른다.
 
 5. Pipeline orchestration (`v2/pipeline_v2.py`)
 - static -> llm -> optional repair -> static re-review
+
+## Leakage/Liveness Lint Layer (PR1)
+
+static reviewer 앞단에서 아래 guard를 deterministic하게 실행한다.
+
+- `FeatureTimeGuard`: short-horizon/cooldown/holding 조합의 과도한 반응성 점검
+- `LookaheadGuard`: 미래 참조로 해석 가능한 feature/표현 패턴 점검
+- `FillAlignmentGuard`: entry path의 execution/position namespace 혼용 점검
+- `LatencyFeasibilityGuard`: cadence/latency 대비 실행 불가능한 구조 점검
+
+lint는 reviewer를 대체하지 않고, `ReviewIssue`로 변환되어 hard gate 입력에 병합된다.
 
 ## CLI (`scripts/review_strategy.py`)
 
@@ -102,6 +114,21 @@ repair priority는 아래 failure pattern에 따라 재정렬된다.
 제약:
 - patcher가 지원하는 deterministic op 범위 밖 수정 금지
 - final hard gate ownership은 static reviewer 유지
+
+## Trial/Family Tracking Foundation (PR1~PR3)
+
+- file-based `TrialRegistry`:
+  - `create`, `get`, `update_stage`, `reject`, `list_by_family`, `attach_family`
+- file-based `LineageTracker`:
+  - `link_parent_child`, `ancestors`, `descendants`
+- deterministic `FamilyFingerprintBuilder`:
+  - motif/side/execution/horizon/regime/feature 축으로 `family_id` 산출
+- file-based `FamilyIndex`:
+  - `upsert`, `get`, `list_members`, `find_duplicate_or_neighbor`
+
+주의:
+- PR3는 family grouping/dedup foundation만 추가한다.
+- walk-forward selector/promotion contract에 family 정책을 강제하는 단계는 후속 범위다.
 
 ## Known Limitations / Deferred Scope
 

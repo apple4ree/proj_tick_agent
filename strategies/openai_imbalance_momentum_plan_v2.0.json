@@ -151,7 +151,7 @@
     "spec_canonical": "v2",
     "generation_source": "openai_v2_plan",
     "plan_schema_version": "plan_v1",
-    "generated_at": "2026-03-29T18:32:19.395914+00:00"
+    "generated_at": "2026-03-30T02:11:20.770271+00:00"
   },
   "execution_policy": {
     "placement_mode": "passive_join",

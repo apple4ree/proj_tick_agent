@@ -155,3 +155,41 @@ def test_generate_all_plots_handles_missing_optional_artifacts(tmp_path: Path):
     }
     for name in names:
         assert (run_dir / "plots" / name).exists()
+
+
+def test_generate_report_plots_emits_default_backtest_subset(tmp_path: Path):
+    visualize = _load_visualize_module()
+    run_dir = tmp_path / "run_report_subset"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    _write_base_artifacts_without_optional(run_dir)
+
+    paths = visualize.generate_report_plots(run_dir, show=False)
+
+    names = {p.name for p in paths}
+    assert names == {
+        "dashboard.png",
+        "intraday_cumulative_profit.png",
+        "trade_timeline.png",
+    }
+    for name in names:
+        assert (run_dir / "plots" / name).exists()
+
+
+def test_generate_report_plots_handles_missing_summary_json(tmp_path: Path):
+    visualize = _load_visualize_module()
+    run_dir = tmp_path / "run_report_no_summary"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    _write_base_artifacts_without_optional(run_dir)
+
+    (run_dir / "summary.json").unlink()
+
+    paths = visualize.generate_report_plots(run_dir, show=False)
+
+    names = {p.name for p in paths}
+    assert names == {
+        "dashboard.png",
+        "intraday_cumulative_profit.png",
+        "trade_timeline.png",
+    }
+    for name in names:
+        assert (run_dir / "plots" / name).exists()

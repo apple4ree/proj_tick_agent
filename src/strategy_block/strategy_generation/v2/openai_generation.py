@@ -21,58 +21,16 @@ from .utils.prompt_builder import build_system_prompt, build_user_prompt
 from .utils.response_parser import (
     PlanParseError,
     check_position_attr_misuse,
+    collect_pre_review_flags,
     parse_plan_response,
     validate_plan,
 )
 
 logger = logging.getLogger(__name__)
 
-_SHORT_HORIZON_THRESHOLD_TICKS = 30
-_SHORT_HORIZON_STYLE_HINTS: frozenset[str] = frozenset({
-    "momentum",
-    "scalping",
-    "execution_adaptive",
-})
-
-
-def _infer_plan_holding_horizon_ticks(plan: StrategyPlan) -> int | None:
-    inferred: int | None = None
-    for xp in plan.exit_policies:
-        for rule in xp.rules:
-            cond = rule.condition
-            if (
-                cond.position_attr == "holding_ticks"
-                and cond.op in {">=", ">"}
-                and cond.threshold is not None
-            ):
-                ticks = int(cond.threshold)
-                if inferred is None or ticks < inferred:
-                    inferred = ticks
-    return inferred
-
 
 def _execution_policy_trace_flags(plan: StrategyPlan) -> dict[str, Any]:
-    holding_horizon = _infer_plan_holding_horizon_ticks(plan)
-    style_hint = str(plan.strategy_style or "").strip().lower()
-    fast_entry = any(0 < ep.cooldown_ticks <= _SHORT_HORIZON_THRESHOLD_TICKS for ep in plan.entry_policies)
-
-    inferred_short_horizon = (
-        holding_horizon is not None and holding_horizon <= _SHORT_HORIZON_THRESHOLD_TICKS
-    ) or (
-        holding_horizon is None
-        and style_hint in _SHORT_HORIZON_STYLE_HINTS
-        and fast_entry
-    )
-
-    execution_policy_explicit = plan.execution_policy is not None
-    return {
-        "execution_policy_explicit": execution_policy_explicit,
-        "inferred_holding_horizon_ticks": holding_horizon,
-        "inferred_short_horizon": inferred_short_horizon,
-        "execution_policy_missing_short_horizon": (
-            (not execution_policy_explicit) and inferred_short_horizon
-        ),
-    }
+    return collect_pre_review_flags(plan)
 
 
 def _build_mock_plan(research_goal: str) -> StrategyPlan:
@@ -232,7 +190,9 @@ def generate_plan_with_openai(
         plan = _build_mock_plan(research_goal)
         trace["parse_success"] = True
         trace["source"] = "mock"
-        trace.update(_execution_policy_trace_flags(plan))
+        flags = _execution_policy_trace_flags(plan)
+        trace.update(flags)
+        trace["pre_review_flags"] = dict(flags)
 
         plan_warnings = validate_plan(plan)
         if plan_warnings:
@@ -278,7 +238,9 @@ def generate_plan_with_openai(
     trace["parse_success"] = True
     trace["source"] = client.mode
     trace["client_meta"] = client.last_query_meta
-    trace.update(_execution_policy_trace_flags(plan))
+    flags = _execution_policy_trace_flags(plan)
+    trace.update(flags)
+    trace["pre_review_flags"] = dict(flags)
 
     plan_warnings = validate_plan(plan)
     if plan_warnings:
@@ -347,6 +309,8 @@ def generate_spec_v2_with_openai(
         "inferred_holding_horizon_ticks": ep_flags["inferred_holding_horizon_ticks"],
         "inferred_short_horizon": ep_flags["inferred_short_horizon"],
         "execution_policy_missing_short_horizon": ep_flags["execution_policy_missing_short_horizon"],
+        "invalid_zero_horizon": ep_flags["invalid_zero_horizon"],
+        "aggressive_passive_short_horizon": ep_flags["aggressive_passive_short_horizon"],
     })
 
     input_ctx: dict[str, Any] = {
@@ -361,6 +325,7 @@ def generate_spec_v2_with_openai(
         "pipeline": "openai_v2_plan_generation",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "input": input_ctx,
+        "pre_review_flags": dict(ep_flags),
         "plan": {
             "name": plan.name,
             "strategy_style": plan.strategy_style,
@@ -373,6 +338,8 @@ def generate_spec_v2_with_openai(
             "inferred_holding_horizon_ticks": ep_flags["inferred_holding_horizon_ticks"],
             "inferred_short_horizon": ep_flags["inferred_short_horizon"],
             "execution_policy_missing_short_horizon": ep_flags["execution_policy_missing_short_horizon"],
+            "invalid_zero_horizon": ep_flags["invalid_zero_horizon"],
+            "aggressive_passive_short_horizon": ep_flags["aggressive_passive_short_horizon"],
             "schema_version": plan.SCHEMA_VERSION,
         },
         "plan_trace": plan_trace,
@@ -386,7 +353,20 @@ def generate_spec_v2_with_openai(
             "n_regimes": len(spec.regimes),
             "execution_policy_explicit": spec.metadata.get("execution_policy_explicit"),
             "execution_policy_missing_short_horizon": spec.metadata.get("execution_policy_missing_short_horizon"),
+            "invalid_zero_horizon": spec.metadata.get("invalid_zero_horizon"),
+            "aggressive_passive_short_horizon": spec.metadata.get("aggressive_passive_short_horizon"),
         },
+        "generation_rescue_attempted": False,
+        "generation_rescue_applied": False,
+        "generation_rescue_operations": [],
+        "rescue": {
+            "attempted": False,
+            "applied": False,
+            "operations": [],
+            "reasons": [],
+            "metadata": {},
+        },
+        "post_rescue_review": None,
         "fallback_used": False,
         "fallback": {"used": False, "count": 0, "events": []},
     }

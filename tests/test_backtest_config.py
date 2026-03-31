@@ -46,14 +46,14 @@ class TestFlatConstruction:
             impact_model="sqrt",
             slicing_algo="POV",
             placement_style="aggressive",
-            queue_model="none",
+            queue_model="prob_queue",
             queue_position_assumption=0.3,
         )
         assert cfg.fee.type == "zero"
         assert cfg.impact.type == "sqrt"
         assert cfg.slicing.algo == "POV"
         assert cfg.placement.style == "aggressive"
-        assert cfg.exchange.queue_model == "none"
+        assert cfg.exchange.queue_model == "prob_queue"
         assert cfg.exchange.queue_position_assumption == 0.3
 
 

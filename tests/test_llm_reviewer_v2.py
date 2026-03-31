@@ -117,7 +117,7 @@ def _backtest_environment() -> dict:
             "order_ack_used_for_fill_gating": False,
         },
         "queue": {
-            "queue_model": "risk_adverse",
+            "queue_model": "prob_queue",
             "queue_position_assumption": 0.5,
         },
         "semantics": {
@@ -141,7 +141,7 @@ def _feedback_summary() -> BacktestFeedbackSummary:
             "max_children_per_parent": 435.0,
         },
         queue={
-            "queue_model": "risk_adverse",
+            "queue_model": "prob_queue",
             "queue_blocked_count": 10022.0,
             "blocked_miss_count": 10022.0,
             "queue_ready_count": 0.0,

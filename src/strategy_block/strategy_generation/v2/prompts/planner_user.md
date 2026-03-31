@@ -13,6 +13,9 @@ Generate a structured strategy plan for the following research goal.
 - Treat the canonical backtest constraint summary above as the primary runtime contract.
 - Interpret tick-based parameters such as `holding_ticks`, `cooldown_ticks`, and `cancel_after_ticks` as cadence-dependent wall-clock durations.
 - Ensure the strategy remains viable under queue waiting, venue latency, and minimal-immediate replace semantics.
+- Do not emit same-tick or zero-horizon strategies.
+- Do not set the effective holding horizon to 0 ticks, and avoid 1-2 tick horizons for passive or repricing strategies.
+- If passive placement is used, the holding horizon must materially exceed the cancel/reprice cadence so orders can dwell in queue.
 
 ## Execution Policy — Explicit Specification (MANDATORY)
 - For short-horizon strategies, do not omit execution_policy.
@@ -22,8 +25,10 @@ Generate a structured strategy plan for the following research goal.
 - Conservative execution policy example for short-horizon strategies:
   - `placement_mode`: "passive_join"
   - `cancel_after_ticks`: 10–20
-  - `max_reprices`: 2–3
+  - `max_reprices`: 1–2
 - When using passive placement, always pair with bounded `cancel_after_ticks` and `max_reprices`.
+- If `holding_ticks` is short, it must still be strictly positive and should usually be >= 10.
+- Never rely on same-tick passive fill assumptions or zero-horizon exits.
 
 ## Execution Policy — Churn Avoidance (MANDATORY)
 - Prefer low-churn execution policies.

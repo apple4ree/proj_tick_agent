@@ -23,7 +23,7 @@ def test_build_backtest_environment_context_has_canonical_fields():
                 "cancel_ms": 3.0,
             },
             "exchange": {
-                "queue_model": "risk_adverse",
+                "queue_model": "prob_queue",
                 "queue_position_assumption": 0.5,
             },
         },
@@ -44,7 +44,7 @@ def test_build_backtest_environment_context_has_canonical_fields():
     assert env["latency"]["order_ack_used_for_fill_gating"] is False
 
     assert "queue" in env
-    assert env["queue"]["queue_model"] == "risk_adverse"
+    assert env["queue"]["queue_model"] == "prob_queue"
     assert env["queue"]["queue_position_assumption"] == 0.5
 
     assert "semantics" in env
@@ -68,7 +68,7 @@ def test_build_backtest_constraint_summary_contains_canonical_contract_terms():
                 "order_ack_used_for_fill_gating": False,
             },
             "queue": {
-                "queue_model": "risk_adverse",
+                "queue_model": "prob_queue",
                 "queue_position_assumption": 0.5,
             },
             "semantics": {

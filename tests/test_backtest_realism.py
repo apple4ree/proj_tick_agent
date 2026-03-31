@@ -475,7 +475,7 @@ class TestObservationLagIntegration:
         config = BacktestConfig(
             symbol="TEST", start_date="2026-03-13", end_date="2026-03-13",
             seed=42, market_data_delay_ms=2000.0, placement_style="passive",
-            queue_model="none",
+            queue_model="prob_queue",
         )
         runner = PipelineRunner(config=config, data_dir=".", strategy=None)
         # Must use __new__ to skip strategy check; set up components manually
@@ -1613,7 +1613,7 @@ class TestDecisionLatencyPhase2Coverage:
             end_date="2026-03-13",
             seed=42,
             placement_style="passive",
-            queue_model="none",
+            queue_model="prob_queue",
             market_data_delay_ms=1000.0,
             decision_compute_ms=decision_ms,
         )

@@ -157,11 +157,7 @@ class ComponentFactory:
     @staticmethod
     def normalize_queue_model(queue_model: str | None) -> str:
         """Normalize queue model name for matching/fill components."""
-        if not isinstance(queue_model, str):
-            return "prob_queue"
-        q = queue_model.strip().lower()
-        allowed = {"none", "price_time", "risk_adverse", "prob_queue", "pro_rata", "random"}
-        return q if q in allowed else "prob_queue"
+        return "prob_queue"
 
     @staticmethod
     def build_matching_engine(cfg: "ExchangeConfig", seed: int | None = None) -> "MatchingEngine":

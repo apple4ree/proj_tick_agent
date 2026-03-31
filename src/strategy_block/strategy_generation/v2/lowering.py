@@ -585,6 +585,13 @@ _SHORT_HORIZON_STYLE_HINTS: frozenset[str] = frozenset({
     "scalping",
     "execution_adaptive",
 })
+_PASSIVE_MODES: frozenset[str] = frozenset({
+    "passive_join",
+    "passive_only",
+    "passive_aggressive",
+})
+_SHORT_MIN_CANCEL_AFTER_TICKS = 10
+_SHORT_MAX_REPRICES = 2
 
 
 def _infer_plan_holding_horizon_ticks(plan: Any) -> int | None:
@@ -610,6 +617,21 @@ def _infer_short_horizon_from_plan(plan: Any, holding_horizon: int | None) -> bo
     style_hint = str(getattr(plan, "strategy_style", "") or "").strip().lower()
     fast_entry = any(0 < ep.cooldown_ticks <= _SHORT_HORIZON_THRESHOLD_TICKS for ep in plan.entry_policies)
     return style_hint in _SHORT_HORIZON_STYLE_HINTS and fast_entry
+
+
+def _is_aggressive_passive_short_horizon(
+    execution_policy: ExecutionPolicyV2 | None,
+    *,
+    inferred_short_horizon: bool,
+) -> bool:
+    if not inferred_short_horizon or execution_policy is None:
+        return False
+    if execution_policy.placement_mode not in _PASSIVE_MODES:
+        return False
+    return (
+        execution_policy.max_reprices > _SHORT_MAX_REPRICES
+        or execution_policy.cancel_after_ticks < _SHORT_MIN_CANCEL_AFTER_TICKS
+    )
 
 
 def lower_plan_to_spec_v2(
@@ -654,22 +676,44 @@ def lower_plan_to_spec_v2(
     holding_horizon = _infer_plan_holding_horizon_ticks(plan)
     inferred_short_horizon = _infer_short_horizon_from_plan(plan, holding_horizon)
     execution_policy_missing_short_horizon = (execution_policy is None and inferred_short_horizon)
+    invalid_zero_horizon = holding_horizon is not None and holding_horizon <= 0
+    aggressive_passive_short_horizon = _is_aggressive_passive_short_horizon(
+        execution_policy,
+        inferred_short_horizon=inferred_short_horizon,
+    )
 
     if execution_policy_missing_short_horizon:
         logger.warning(
             "Plan '%s' appears short-horizon but omitted execution_policy; keeping None and marking metadata for review",
             plan.name,
         )
+    if invalid_zero_horizon:
+        logger.warning(
+            "Plan '%s' has non-positive holding horizon (holding_ticks=%s)",
+            plan.name,
+            holding_horizon,
+        )
+    if aggressive_passive_short_horizon:
+        logger.warning(
+            "Plan '%s' has aggressive passive short-horizon execution envelope",
+            plan.name,
+        )
+
+    pre_review_flags: dict[str, Any] = {
+        "execution_policy_explicit": execution_policy is not None,
+        "inferred_holding_horizon_ticks": holding_horizon,
+        "inferred_short_horizon": inferred_short_horizon,
+        "execution_policy_missing_short_horizon": execution_policy_missing_short_horizon,
+        "invalid_zero_horizon": invalid_zero_horizon,
+        "aggressive_passive_short_horizon": aggressive_passive_short_horizon,
+    }
 
     metadata: dict[str, Any] = {
         "pipeline": "v2_openai_plan_lowering",
         "plan_name": plan.name,
         "plan_style": plan.strategy_style,
-        "execution_policy_explicit": execution_policy is not None,
         "execution_policy_missing": execution_policy is None,
-        "inferred_holding_horizon_ticks": holding_horizon,
-        "inferred_short_horizon": inferred_short_horizon,
-        "execution_policy_missing_short_horizon": execution_policy_missing_short_horizon,
+        **pre_review_flags,
     }
 
     return StrategySpecV2(

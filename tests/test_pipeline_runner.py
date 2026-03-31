@@ -133,7 +133,7 @@ def test_pipeline_runner_manages_open_orders_and_halts():
         end_date="2026-03-12",
         seed=7,
         placement_style="passive",
-        queue_model="none",
+        queue_model="prob_queue",
     )
     runner = PipelineRunner(config=config, data_dir=".", strategy=DummyBuyStrategy())
     runner._setup_components(config)

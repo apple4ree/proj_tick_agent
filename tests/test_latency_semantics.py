@@ -230,7 +230,7 @@ def test_replace_uses_immediate_cancel_exception_and_new_submit_lifecycle() -> N
         market_data_delay_ms=0.0,
         decision_compute_ms=0.0,
         placement_style="passive",
-        queue_model="none",
+        queue_model="prob_queue",
     )
     runner = PipelineRunner(config=config, data_dir=".", strategy=NullStrategy())
     runner._setup_components(config)

@@ -1,0 +1,72 @@
+selection:
+  output_root: outputs/walk_forward
+
+  selection_snapshot:
+    output_root: outputs/selection_snapshots
+
+  family_penalty:
+    enabled: true
+    weight: 0.15
+    soft_family_trial_count: 3
+    hard_family_trial_count: 6
+
+  duplicate_penalty:
+    enabled: true
+    weight: 0.8
+    hard_fail_similarity: 0.985
+
+  neighbor_penalty:
+    enabled: true
+    weight: 0.3
+
+  walk_forward:
+    train_days: 5
+    select_days: 1
+    holdout_days: 1
+    forward_days: 1
+    step_days: 1
+    fallback_single_window: true
+
+  scoring:
+    scales:
+      net_pnl: 100000.0
+      pnl_per_parent: 3000.0
+      pnl_per_fill: 1000.0
+    components:
+      edge_net_pnl_weight: 1.0
+      edge_pnl_per_parent_weight: 0.7
+      edge_pnl_per_fill_weight: 0.4
+    targets:
+      children_per_parent: 3.0
+      cancel_rate: 0.35
+      maker_fill_ratio: 0.35
+      adverse_selection_share: 0.45
+    penalties:
+      children_per_parent_weight: 0.12
+      cancel_rate_weight: 1.2
+      child_order_count_weight: 0.001
+      maker_fill_ratio_gap_weight: 1.0
+      queue_blocked_count_weight: 0.002
+      blocked_miss_count_weight: 0.01
+      commission_weight: 0.0005
+      slippage_weight: 0.0005
+      impact_weight: 0.0005
+      adverse_selection_weight: 1.0
+    flags:
+      children_per_parent_churn_heavy: 8.0
+      cancel_rate_churn_heavy: 0.7
+      maker_fill_ratio_queue_ineffective: 0.15
+      blocked_miss_queue_ineffective: 10.0
+      cost_to_abs_pnl_dominated: 1.0
+      adverse_selection_dominated: 0.6
+
+  selector:
+    min_windows: 2
+    min_pass_windows: 1
+    min_window_score: -0.75
+    min_average_score: -0.25
+    max_churn_heavy_share: 0.7
+    max_cost_dominated_share: 0.8
+    max_adverse_selection_share: 0.8
+    max_score_std: 2.5
+    max_same_family_promoted_candidates: 2

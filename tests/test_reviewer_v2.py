@@ -222,7 +222,7 @@ def _env_context(*, resample: str, tick_ms: float, submit_ms: float, cancel_ms: 
             "order_ack_used_for_fill_gating": False,
         },
         "queue": {
-            "queue_model": "risk_adverse",
+            "queue_model": "prob_queue",
             "queue_position_assumption": 0.5,
         },
         "semantics": {
@@ -351,3 +351,48 @@ def test_reviewer_without_env_keeps_tick_based_fallback() -> None:
 
     result = reviewer.review(spec)
     assert not any(i.category == "churn_risk_high" and i.severity == "error" for i in result.issues)
+
+
+def test_reviewer_maps_leakage_lint_error_into_review_error() -> None:
+    reviewer = StrategyReviewerV2()
+    spec = _valid_spec(
+        entry_policies=[
+            EntryPolicyV2(
+                name="future_entry",
+                side="long",
+                trigger=ComparisonExpr(feature="future_mid_price", op=">", threshold=0.1),
+                strength=ConstExpr(value=0.4),
+            ),
+        ],
+    )
+
+    result = reviewer.review(spec)
+    assert result.passed is False
+    assert any(
+        i.category == "leakage_lookahead_risk" and i.severity == "error"
+        for i in result.issues
+    )
+
+
+def test_reviewer_maps_leakage_lint_warning_into_review_warning() -> None:
+    reviewer = StrategyReviewerV2()
+    spec = _valid_spec(
+        entry_policies=[
+            EntryPolicyV2(
+                name="position_attr_entry",
+                side="long",
+                trigger=ComparisonExpr(
+                    left=PositionAttrExpr("position_size"),
+                    op=">",
+                    threshold=0.0,
+                ),
+                strength=ConstExpr(value=0.4),
+            ),
+        ],
+    )
+
+    result = reviewer.review(spec)
+    assert any(
+        i.category == "leakage_fill_alignment_risk" and i.severity == "warning"
+        for i in result.issues
+    )

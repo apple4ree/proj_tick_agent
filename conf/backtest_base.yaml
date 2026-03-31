@@ -34,8 +34,7 @@ backtest:
   placement_style: spread_adaptive
   exchange_model: partial_fill
   # Queue models (handled by FillSimulator):
-  # none | price_time | risk_adverse | prob_queue | random | pro_rata
-  queue_model: risk_adverse
+  queue_model: prob_queue
   queue_position_assumption: 0.5
   # Observation lag: strategy sees market data delayed by this amount (ms).
   # 0.0 = no delay (current behavior). Actual past-state lookup, not timestamp shift.

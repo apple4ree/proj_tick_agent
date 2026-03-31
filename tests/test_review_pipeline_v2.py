@@ -92,7 +92,7 @@ def _feedback_summary() -> BacktestFeedbackSummary:
             "max_children_per_parent": 50.0,
         },
         queue={
-            "queue_model": "risk_adverse",
+            "queue_model": "prob_queue",
             "queue_blocked_count": 20.0,
             "blocked_miss_count": 20.0,
             "queue_ready_count": 0.0,
@@ -195,7 +195,7 @@ def _canonical_backtest_environment() -> dict:
             "order_ack_used_for_fill_gating": False,
         },
         "queue": {
-            "queue_model": "risk_adverse",
+            "queue_model": "prob_queue",
             "queue_position_assumption": 0.5,
         },
         "semantics": {
@@ -349,3 +349,39 @@ def test_run_auto_repair_forwards_backtest_feedback_to_repair_planner():
     assert planner.called_feedback is feedback
     assert result.backtest_feedback == feedback
     assert result.feedback_aware_repair is True
+
+
+def test_run_static_review_surfaces_leakage_lint_errors() -> None:
+    spec = StrategySpecV2(
+        name="pipeline_leakage_case",
+        entry_policies=[
+            EntryPolicyV2(
+                name="future_entry",
+                side="long",
+                trigger=ComparisonExpr(feature="future_mid_price", op=">", threshold=0.1),
+                strength=ConstExpr(value=0.4),
+            ),
+        ],
+        exit_policies=[
+            ExitPolicyV2(
+                name="exits",
+                rules=[
+                    ExitRuleV2(
+                        name="stop",
+                        priority=1,
+                        condition=ComparisonExpr(
+                            left=PositionAttrExpr("unrealized_pnl_bps"),
+                            op="<=",
+                            threshold=-25.0,
+                        ),
+                        action=ExitActionV2(type="close_all"),
+                    ),
+                ],
+            ),
+        ],
+        risk_policy=RiskPolicyV2(max_position=100, inventory_cap=200),
+    )
+
+    result = run_static_review(spec)
+    assert result.passed is False
+    assert any(i.category == "leakage_lookahead_risk" and i.severity == "error" for i in result.issues)

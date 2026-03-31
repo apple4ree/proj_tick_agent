@@ -131,10 +131,9 @@ CANONICAL_DIAGNOSTIC_FIELDS = {
 }
 
 REQUIRED_PLOTS = [
-    "overview.png",
+    "dashboard.png",
+    "intraday_cumulative_profit.png",
     "trade_timeline.png",
-    "equity_risk.png",
-    "realism_dashboard.png",
 ]
 
 
@@ -297,7 +296,7 @@ def _run_backtest(
         fee_model="krx",
         impact_model="linear",
         exchange_model="partial_fill",
-        queue_model="risk_adverse",
+        queue_model="prob_queue",
         queue_position_assumption=0.5,
         market_data_delay_ms=market_data_delay_ms,
         decision_compute_ms=0.0,

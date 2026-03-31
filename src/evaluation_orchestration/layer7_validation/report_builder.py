@@ -130,8 +130,8 @@ class ReportBuilder:
         if states:
             self._save_market_quotes(states, run_dir)
 
-        self._generate_plots(run_dir)
         self._write_runtime_artifacts(result, run_dir)
+        self._generate_plots(run_dir)
         logger.info("Results saved to %s", run_dir)
 
     def save_runtime_artifacts(
@@ -243,7 +243,7 @@ class ReportBuilder:
 
     @staticmethod
     def _generate_plots(run_dir: Path) -> None:
-        """Generate visualization plots from saved CSVs."""
+        """Generate default backtest plots (dashboard, intraday PnL, trade timeline)."""
         try:
             import importlib.util
 
@@ -251,7 +251,7 @@ class ReportBuilder:
             _spec = importlib.util.spec_from_file_location("visualize_script", _viz_path)
             _mod = importlib.util.module_from_spec(_spec)  # type: ignore[arg-type]
             _spec.loader.exec_module(_mod)  # type: ignore[union-attr]
-            paths = _mod.generate_all_plots(run_dir, show=False)
+            paths = _mod.generate_report_plots(run_dir, show=False)
             plot_names = ", ".join(Path(p).name for p in paths)
             logger.info("Generated %d plots in %s [%s]", len(paths), run_dir / "plots", plot_names)
         except Exception as exc:  # noqa: BLE001

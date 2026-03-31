@@ -1,0 +1,37 @@
+{
+  "strategy_id": "rolling_mean_reversion_v2.0",
+  "name": "rolling_mean_reversion",
+  "version": "2.0",
+  "status": "reviewed",
+  "created_at": "2026-03-30T18:10:26.983228+00:00",
+  "generation_backend": "openai",
+  "generation_mode": "live",
+  "static_review_passed": true,
+  "approved_for_backtest": false,
+  "approved_for_live": false,
+  "spec_format": "v2",
+  "spec_path": "/home/dgu/tick/proj_rl_agent/strategies/rolling_mean_reversion_v2.0.json",
+  "trace_path": "/home/dgu/tick/proj_rl_agent/outputs/strategy_traces/rolling_mean_reversion_v2.0_trace.json",
+  "extra": {
+    "generation": {
+      "generation_outcome": "fallback_success",
+      "static_review_passed": true,
+      "fallback_used": true,
+      "fallback_count": 1,
+      "fallback_events": [
+        {
+          "stage": "generator",
+          "type": "openai_to_template_fallback",
+          "reason": "OpenAI returned no response (mode=live, status=live_failed)",
+          "severity": "medium"
+        }
+      ],
+      "generation_class": "template_v2",
+      "requested_backend": "openai",
+      "effective_backend": "template_v2",
+      "requested_mode": "live",
+      "effective_mode": "live",
+      "spec_format": "v2"
+    }
+  }
+}

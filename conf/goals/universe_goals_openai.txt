@@ -1,0 +1,6 @@
+order imbalance alpha with explicit execution policy and conservative passive repricing
+mean reversion with holding horizon at least 10 ticks and explicit execution policy
+spread fade strategy with bounded cancel_after_ticks and low churn execution policy
+microprice dislocation strategy with robust stop-loss and time exit
+queue depletion reversal strategy with conservative passive execution
+short-horizon continuation with explicit execution policy and bounded repricing

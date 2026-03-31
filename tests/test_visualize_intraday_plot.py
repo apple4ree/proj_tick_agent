@@ -244,3 +244,55 @@ def test_intraday_plot_uses_pnl_series_when_entries_missing(tmp_path: Path):
     out = visualize.plot_intraday_cumulative_profit(data, run_dir, show=False)
 
     assert out.exists()
+
+
+def test_intraday_summary_lines_include_required_and_optional_metrics():
+    visualize = _load_visualize_module()
+    summary = {
+        "net_pnl": -981725.0,
+        "sharpe_ratio": -3.9,
+        "max_drawdown": 1.0,
+        "fill_rate": 0.98,
+        "cancel_rate": 0.93,
+        "total_commission": 1214237.0,
+        "total_slippage": 340221.0,
+        "maker_fill_ratio": 0.61,
+        "avg_latency_ms": 2.7,
+    }
+
+    lines = visualize._build_intraday_summary_lines(summary)
+    text = " ".join(lines)
+
+    for token in ["Net PnL:", "Sharpe:", "Max DD:", "Fill Rate:", "Cancel Rate:"]:
+        assert token in text
+    for token in ["Commission:", "Slippage:", "Maker Fill:", "Avg Latency:"]:
+        assert token in text
+
+
+
+def test_intraday_summary_lines_fallback_without_summary():
+    visualize = _load_visualize_module()
+
+    lines = visualize._build_intraday_summary_lines({})
+
+    assert lines == ["Summary metrics unavailable"]
+
+
+
+def test_intraday_plot_generates_without_summary_json(tmp_path: Path):
+    visualize = _load_visualize_module()
+    run_dir = tmp_path / "run_no_summary"
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    idx = pd.date_range("2026-03-13 09:00:00", periods=5, freq="1s")
+    pd.DataFrame({"cumulative_net_pnl": [0.0, 10.0, 5.0, 20.0, 25.0]}, index=idx).to_csv(
+        run_dir / "pnl_series.csv"
+    )
+
+    data = visualize.load_run(run_dir)
+    assert "summary" not in data
+
+    out = visualize.plot_intraday_cumulative_profit(data, run_dir, show=False)
+
+    assert out.name == "intraday_cumulative_profit.png"
+    assert out.exists()

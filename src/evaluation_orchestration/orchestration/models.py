@@ -19,6 +19,7 @@ class JobType(str, enum.Enum):
     REVIEW_STRATEGY = "review_strategy"
     SINGLE_BACKTEST = "single_backtest"
     UNIVERSE_BACKTEST = "universe_backtest"
+    WALK_FORWARD_EVALUATION = "walk_forward_evaluation"
     SUMMARIZE_RESULTS = "summarize_results"
 
 

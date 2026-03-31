@@ -9,6 +9,7 @@
 - 실행 품질: IS(Implementation Shortfall), VWAP diff, fill rate, maker ratio
 - 턴오버/보유 기간 메트릭
 - 성과 귀인 분석
+- walk-forward selection scoring (robustness/stability-aware aggregate)
 
 ## 대표 파일
 
@@ -19,6 +20,7 @@
 | `execution_metrics.py` | `ExecutionReport` | IS bps, VWAP diff, fill/cancel rate, latency 통계 |
 | `turnover_metrics.py` | — | 턴오버, 보유 기간 통계 |
 | `attribution.py` | `AttributionReport` | 성과 귀인 분석 |
+| `selection_metrics.py` | `SelectionMetrics`, `SelectionScore` | walk-forward run score (edge - churn/cost/queue/adverse penalties) |
 
 ## PnL 비용 계층
 
@@ -33,6 +35,8 @@ impact = 추정 temporary market-impact (정보 목적)
 
 Layer 5(Simulator)의 FillEvent를 받아 메트릭을 계산한다. ReportBuilder(Layer 7)가 이 메트릭들을 모아 최종 리포트를 생성한다.
 
+Walk-forward 검증에서는 `selection_metrics.py`가 `summary.json` + `realism_diagnostics.json` aggregate를 입력으로 deterministic selection score를 계산한다.
+
 ## 주의사항
 
 - Attribution report는 config에서 비활성화 가능 (smoke에서 off)
@@ -41,5 +45,5 @@ Layer 5(Simulator)의 FillEvent를 받아 메트릭을 계산한다. ReportBuild
 
 ## 관련 문서
 
-- [../layer7_validation/README.md](../layer7_validation/README.md) — ReportBuilder가 메트릭 조립
+- [../layer7_validation/README.md](../layer7_validation/README.md) — ReportBuilder가 메트릭 조립 + walk-forward harness
 - [../../market_simulation/layer5_simulator/README.md](../../market_simulation/layer5_simulator/README.md) — FillEvent 생성

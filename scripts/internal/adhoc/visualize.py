@@ -813,9 +813,52 @@ def _build_intraday_cumulative_profit_series(data: dict) -> pd.Series:
     return pd.Series(dtype=float, name="cumulative_net_pnl")
 
 
+def _build_intraday_summary_lines(summary: dict[str, Any]) -> list[str]:
+    """Build compact intraday key-metrics summary lines for the chart footer."""
+    if not summary:
+        return ["Summary metrics unavailable"]
+
+    def _fmt_metric(key: str, *, ndigits: int = 2, suffix: str = "") -> str:
+        val = _summary_float(summary, key)
+        if np.isnan(val):
+            return "N/A"
+        return f"{_fmt_value(val, ndigits=ndigits)}{suffix}"
+
+    line1 = " | ".join(
+        [
+            f"Net PnL: {_fmt_metric('net_pnl', ndigits=0, suffix=' KRW')}",
+            f"Sharpe: {_fmt_metric('sharpe_ratio', ndigits=2)}",
+            f"Max DD: {_fmt_metric('max_drawdown', ndigits=4)}",
+            f"Fill Rate: {_fmt_metric('fill_rate', ndigits=2)}",
+            f"Cancel Rate: {_fmt_metric('cancel_rate', ndigits=2)}",
+        ]
+    )
+
+    optional_specs = [
+        ("Commission", "total_commission", 0, " KRW"),
+        ("Slippage", "total_slippage", 0, " KRW"),
+        ("Maker Fill", "maker_fill_ratio", 2, ""),
+        ("Avg Latency", "avg_latency_ms", 2, " ms"),
+    ]
+    optional_metrics = []
+    for label, key, ndigits, suffix in optional_specs:
+        value = _summary_float(summary, key)
+        if np.isnan(value):
+            continue
+        optional_metrics.append(f"{label}: {_fmt_value(value, ndigits=ndigits)}{suffix}")
+
+    lines = [line1]
+    if optional_metrics:
+        lines.append(" | ".join(optional_metrics))
+    return lines
+
+
 def plot_intraday_cumulative_profit(data: dict, run_dir: Path, show: bool = True) -> Path:
     """Line chart of intraday cumulative profit over 09:00–16:00."""
     series = _build_intraday_cumulative_profit_series(data).sort_index()
+    summary = data.get("summary", {})
+    if not isinstance(summary, dict):
+        summary = {}
 
     fig, ax = plt.subplots(figsize=(14, 5))
     ax.set_title("Intraday Cumulative Profit", fontsize=12, fontweight="bold")
@@ -847,7 +890,18 @@ def plot_intraday_cumulative_profit(data: dict, run_dir: Path, show: bool = True
     ax.xaxis.set_major_locator(mdates.HourLocator(byhour=range(9, 17), interval=1))
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
 
-    plt.tight_layout()
+    metrics_text = "\n".join(_build_intraday_summary_lines(summary))
+    fig.tight_layout(rect=[0, 0.15, 1, 1])
+    fig.text(
+        0.5,
+        0.03,
+        metrics_text,
+        ha="center",
+        va="bottom",
+        fontsize=8.7,
+        fontfamily="monospace",
+        bbox=dict(boxstyle="round,pad=0.35", facecolor="#f3f4f6", edgecolor="#d1d5db", alpha=0.92),
+    )
 
     out_path = run_dir / "plots" / "intraday_cumulative_profit.png"
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1334,6 +1388,30 @@ def generate_all_plots(run_dir: str | Path, show: bool = False) -> list[Path]:
         plot_trade_timeline,
         plot_equity_risk,
         plot_realism_dashboard,
+    ]
+
+    paths: list[Path] = []
+    for plot_fn in plotters:
+        try:
+            paths.append(plot_fn(data, run_dir, show=show))
+        except Exception as exc:  # noqa: BLE001
+            print(f"Plot generation failed: {plot_fn.__name__}: {exc}", file=sys.stderr)
+
+    return paths
+
+
+def generate_report_plots(run_dir: str | Path, show: bool = False) -> list[Path]:
+    """Generate the default plot subset used by the backtest report builder."""
+    run_dir = Path(run_dir)
+    if not run_dir.exists():
+        raise FileNotFoundError(f"Run directory not found: {run_dir}")
+
+    data = load_run(run_dir)
+
+    plotters = [
+        plot_summary_dashboard,
+        plot_intraday_cumulative_profit,
+        plot_trade_timeline,
     ]
 
     paths: list[Path] = []

@@ -3,6 +3,7 @@ from .risk_metrics import RiskMetrics, RiskReport
 from .execution_metrics import ExecutionMetrics, ExecutionReport
 from .turnover_metrics import TurnoverMetrics, TurnoverReport
 from .attribution import AttributionAnalyzer, AttributionReport
+from .selection_metrics import SelectionMetrics, SelectionScore
 
 __all__ = [
     "PnLLedger", "PnLEntry", "PnLReport",
@@ -10,4 +11,5 @@ __all__ = [
     "ExecutionMetrics", "ExecutionReport",
     "TurnoverMetrics", "TurnoverReport",
     "AttributionAnalyzer", "AttributionReport",
+    "SelectionMetrics", "SelectionScore",
 ]

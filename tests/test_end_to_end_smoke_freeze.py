@@ -110,7 +110,7 @@ def test_generation_review_backtest_smoke_freeze_path():
             fee_model="krx",
             impact_model="linear",
             exchange_model="partial_fill",
-            queue_model="risk_adverse",
+            queue_model="prob_queue",
             queue_position_assumption=0.5,
             market_data_delay_ms=0.0,
             decision_compute_ms=0.0,
@@ -130,10 +130,9 @@ def test_generation_review_backtest_smoke_freeze_path():
 
         plots_dir = run_dir / "plots"
         required_plots = {
-            "overview.png",
+            "dashboard.png",
+            "intraday_cumulative_profit.png",
             "trade_timeline.png",
-            "equity_risk.png",
-            "realism_dashboard.png",
         }
         for name in required_plots:
             assert (plots_dir / name).exists()

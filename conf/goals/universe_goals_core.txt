@@ -1,0 +1,6 @@
+order imbalance alpha
+mean reversion
+spread fade
+microprice dislocation
+queue depletion reversal
+short-horizon continuation

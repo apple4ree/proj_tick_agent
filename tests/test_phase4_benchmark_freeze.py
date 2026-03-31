@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import copy
 import json
 import subprocess
@@ -10,6 +11,25 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
+
+
+def _load_phase4_freeze_module():
+    script_path = PROJECT_ROOT / "scripts" / "internal" / "adhoc" / "run_phase4_benchmark_freeze.py"
+    spec = importlib.util.spec_from_file_location("phase4_benchmark_freeze_script", script_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec is not None and spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_phase4_benchmark_freeze_required_plots_contract() -> None:
+    mod = _load_phase4_freeze_module()
+    assert mod.REQUIRED_PLOTS == [
+        "dashboard.png",
+        "intraday_cumulative_profit.png",
+        "trade_timeline.png",
+    ]
 
 
 def test_phase4_benchmark_freeze_artifact_contract():

@@ -1,0 +1,158 @@
+{
+  "name": "rolling_mean_reversion",
+  "version": "2.0",
+  "description": "Mean-revert when order imbalance deviates from its rolling average. Uses rolling mean over 10 ticks as baseline.",
+  "spec_format": "v2",
+  "preconditions": [
+    {
+      "name": "spread_ok",
+      "condition": {
+        "type": "comparison",
+        "op": "<",
+        "threshold": 20.0,
+        "feature": "spread_bps"
+      }
+    }
+  ],
+  "entry_policies": [
+    {
+      "name": "revert_long",
+      "side": "long",
+      "trigger": {
+        "type": "all",
+        "children": [
+          {
+            "type": "comparison",
+            "op": "<",
+            "threshold": -0.3,
+            "feature": "order_imbalance"
+          },
+          {
+            "type": "comparison",
+            "op": ">",
+            "threshold": -0.1,
+            "left": {
+              "type": "rolling",
+              "feature": "order_imbalance",
+              "method": "mean",
+              "window": 10
+            }
+          }
+        ]
+      },
+      "strength": {
+        "type": "const",
+        "value": 0.5
+      },
+      "constraints": {
+        "cooldown_ticks": 60,
+        "no_reentry_until_flat": false
+      }
+    },
+    {
+      "name": "revert_short",
+      "side": "short",
+      "trigger": {
+        "type": "all",
+        "children": [
+          {
+            "type": "comparison",
+            "op": ">",
+            "threshold": 0.3,
+            "feature": "order_imbalance"
+          },
+          {
+            "type": "comparison",
+            "op": "<",
+            "threshold": 0.1,
+            "left": {
+              "type": "rolling",
+              "feature": "order_imbalance",
+              "method": "mean",
+              "window": 10
+            }
+          }
+        ]
+      },
+      "strength": {
+        "type": "const",
+        "value": 0.5
+      },
+      "constraints": {
+        "cooldown_ticks": 60,
+        "no_reentry_until_flat": false
+      }
+    }
+  ],
+  "exit_policies": [
+    {
+      "name": "reversion_exits",
+      "rules": [
+        {
+          "name": "stop_loss",
+          "priority": 1,
+          "condition": {
+            "type": "comparison",
+            "op": "<=",
+            "threshold": -20.0,
+            "left": {
+              "type": "position_attr",
+              "name": "unrealized_pnl_bps"
+            }
+          },
+          "action": {
+            "type": "close_all"
+          }
+        },
+        {
+          "name": "time_exit",
+          "priority": 2,
+          "condition": {
+            "type": "comparison",
+            "op": ">=",
+            "threshold": 60.0,
+            "left": {
+              "type": "position_attr",
+              "name": "holding_ticks"
+            }
+          },
+          "action": {
+            "type": "close_all"
+          }
+        },
+        {
+          "name": "revert_complete",
+          "priority": 3,
+          "condition": {
+            "type": "comparison",
+            "op": ">",
+            "threshold": 0.0,
+            "feature": "order_imbalance"
+          },
+          "action": {
+            "type": "close_all"
+          }
+        }
+      ]
+    }
+  ],
+  "risk_policy": {
+    "max_position": 300,
+    "inventory_cap": 600,
+    "position_sizing": {
+      "mode": "fixed",
+      "base_size": 100,
+      "max_size": 300
+    }
+  },
+  "regimes": [],
+  "metadata": {
+    "pipeline": "v2_template_lowering",
+    "template_name": "rolling_mean_reversion",
+    "research_goal": "mean reversion with holding horizon at least 10 ticks and explicit execution policy",
+    "idea_name": "rolling_mean_reversion",
+    "latency_ms": 1.0,
+    "spec_canonical": "v2",
+    "generated_at": "2026-03-30T18:10:26.979785+00:00"
+  }
+}

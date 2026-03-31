@@ -12,7 +12,7 @@ generation:
   mode: live                     # live | mock | replay  (openai backend 전용)
   latency_ms: 1.0                # 기본 latency — spec holding period 보정용
   auto_approve: false            # true면 생성 즉시 APPROVED 상태로 전환
-  n_ideas: 3                     # template: 생성할 아이디어 수 / openai: fallback 시 사용
+  n_ideas: 10                     # template: 생성할 아이디어 수 / openai: fallback 시 사용
   idea_index: 0                  # template: 선택할 아이디어 인덱스 / openai: fallback 시 사용
   static_review_required: true   # false면 review skip (비권장)
   allow_template_fallback: true  # openai 실패(PlanParseError) 시 template fallback 허용

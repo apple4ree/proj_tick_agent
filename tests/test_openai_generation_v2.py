@@ -53,6 +53,7 @@ from strategy_block.strategy_generation.v2.utils.response_parser import (
     parse_plan_response,
     validate_plan,
 )
+from strategy_block.strategy_review.review_common import ReviewIssue, ReviewResult
 from strategy_block.strategy_review.v2.reviewer_v2 import StrategyReviewerV2
 from strategy_block.strategy_generation.v2.utils.prompt_builder import build_user_prompt
 from strategy_block.strategy_specs.v2.schema_v2 import StrategySpecV2
@@ -338,6 +339,27 @@ class TestGeneratePlanWithOpenAI:
         assert plan1.strategy_style == "momentum"
         assert plan2.strategy_style == "mean_reversion"
 
+    def test_short_horizon_missing_execution_policy_trace_flags(self, mock_client: OpenAIStrategyGenClient, monkeypatch):
+        def _mock_missing_ep_plan(goal: str) -> StrategyPlan:
+            plan = _build_mock_plan(goal)
+            plan.execution_policy = None
+            plan.exit_policies[0].rules[1].condition.threshold = 10.0
+            return plan
+
+        monkeypatch.setattr(
+            "strategy_block.strategy_generation.v2.openai_generation._build_mock_plan",
+            _mock_missing_ep_plan,
+        )
+        plan, trace = generate_plan_with_openai(
+            client=mock_client,
+            research_goal="missing ep short horizon",
+        )
+        assert plan.execution_policy is None
+        assert trace["execution_policy_missing_short_horizon"] is True
+        assert trace["pre_review_flags"]["execution_policy_missing_short_horizon"] is True
+        warnings = trace.get("plan_warnings", [])
+        assert any("Short-horizon plan has no execution_policy" in w for w in warnings)
+
 
 class TestGenerateSpecV2WithOpenAI:
 
@@ -380,6 +402,9 @@ class TestGenerateSpecV2WithOpenAI:
         assert trace["plan"]["n_entries"] >= 2
         assert "plan_trace" in trace
         assert trace["output"]["spec_format"] == "v2"
+        assert "pre_review_flags" in trace
+        assert "invalid_zero_horizon" in trace["pre_review_flags"]
+        assert "aggressive_passive_short_horizon" in trace["pre_review_flags"]
 
         assert "execution_policy_explicit" in trace["plan"]
         assert "inferred_short_horizon" in trace["plan"]
@@ -454,7 +479,7 @@ class TestGeneratorOpenAIBackend:
                     "order_ack_used_for_fill_gating": False,
                 },
                 "queue": {
-                    "queue_model": "risk_adverse",
+                    "queue_model": "prob_queue",
                     "queue_position_assumption": 0.5,
                 },
                 "semantics": {
@@ -468,7 +493,77 @@ class TestGeneratorOpenAIBackend:
         env = trace["input"]["backtest_environment"]
         assert env["resample"] == "500ms"
         assert env["latency"]["order_submit_ms"] == 5.0
-        assert env["queue"]["queue_model"] == "risk_adverse"
+        assert env["queue"]["queue_model"] == "prob_queue"
+
+    def test_initial_static_review_fail_then_rescue_rereview_pass(self, monkeypatch):
+        def _mock_missing_ep_plan(goal: str) -> StrategyPlan:
+            plan = _build_mock_plan(goal)
+            plan.execution_policy = None
+            plan.exit_policies[0].rules[1].condition.threshold = 10.0
+            return plan
+
+        monkeypatch.setattr(
+            "strategy_block.strategy_generation.v2.openai_generation._build_mock_plan",
+            _mock_missing_ep_plan,
+        )
+
+        class _MissingEPReviewer:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def review(self, spec, backtest_environment=None):
+                self.calls += 1
+                if spec.execution_policy is None:
+                    return ReviewResult(
+                        passed=False,
+                        issues=[
+                            ReviewIssue(
+                                severity="error",
+                                category="missing_execution_policy_for_short_horizon",
+                                description="Short horizon but no explicit execution_policy",
+                            )
+                        ],
+                    )
+                return ReviewResult(passed=True, issues=[])
+
+        reviewer = _MissingEPReviewer()
+        gen = StrategyGenerator(backend="openai", mode="mock", spec_format="v2")
+        gen._reviewer_v2 = reviewer
+
+        spec, trace = gen.generate(research_goal="rescue missing execution policy")
+
+        assert reviewer.calls == 2
+        assert spec.execution_policy is not None
+        assert trace["generation_rescue_attempted"] is True
+        assert trace["generation_rescue_applied"] is True
+        assert "insert_default_execution_policy_for_short_horizon" in trace["generation_rescue_operations"]
+        assert trace["post_rescue_review"]["passed"] is True
+        assert trace["static_review_passed"] is True
+
+    def test_non_rescuable_issue_still_fails(self):
+        class _LookaheadReviewer:
+            def review(self, spec, backtest_environment=None):
+                return ReviewResult(
+                    passed=False,
+                    issues=[
+                        ReviewIssue(
+                            severity="error",
+                            category="leakage_lookahead_risk",
+                            description="[LOOKAHEAD_FUTURE_REF] future leakage detected",
+                        )
+                    ],
+                )
+
+        gen = StrategyGenerator(backend="openai", mode="mock", spec_format="v2")
+        gen._reviewer_v2 = _LookaheadReviewer()
+
+        with pytest.raises(StaticReviewError) as exc:
+            gen.generate(research_goal="non rescuable failure")
+
+        trace = exc.value.trace
+        assert trace["generation_rescue_attempted"] is False
+        assert trace["generation_rescue_applied"] is False
+        assert trace["generation_outcome"] == "failed"
 
 
 # ── Fallback policies ────────────────────────────────────────────────
@@ -1035,7 +1130,7 @@ def test_build_user_prompt_includes_canonical_backtest_constraint_summary():
                 "order_ack_used_for_fill_gating": False,
             },
             "queue": {
-                "queue_model": "risk_adverse",
+                "queue_model": "prob_queue",
                 "queue_position_assumption": 0.5,
             },
             "semantics": {
@@ -1048,5 +1143,5 @@ def test_build_user_prompt_includes_canonical_backtest_constraint_summary():
 
     assert "Backtest constraint summary (canonical)" in prompt
     assert "tick = resample step" in prompt
-    assert "queue_model=risk_adverse" in prompt
+    assert "queue_model=prob_queue" in prompt
     assert "replace is minimal immediate, not staged venue replace" in prompt

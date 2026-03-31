@@ -1,0 +1,26 @@
+selection:
+  walk_forward:
+    train_days: 7
+    select_days: 2
+    holdout_days: 2
+    forward_days: 2
+    step_days: 2
+    fallback_single_window: true
+  scoring:
+    penalties:
+      children_per_parent_weight: 0.16
+      cancel_rate_weight: 1.4
+      blocked_miss_count_weight: 0.015
+      commission_weight: 0.0007
+      slippage_weight: 0.0007
+      impact_weight: 0.0007
+      adverse_selection_weight: 1.2
+  selector:
+    min_windows: 3
+    min_pass_windows: 2
+    min_window_score: -0.5
+    min_average_score: -0.1
+    max_churn_heavy_share: 0.6
+    max_cost_dominated_share: 0.6
+    max_adverse_selection_share: 0.6
+    max_score_std: 1.5

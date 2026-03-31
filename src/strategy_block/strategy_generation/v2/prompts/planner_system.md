@@ -14,6 +14,9 @@ Your task is to produce a **structured strategy plan** (JSON matching the Strate
 8. Exit policies MUST include at least one `close_all` rule using `position_attr`.
 9. The plan must be self-consistent: entry/exit policy names referenced in regimes must exist.
 10. Every state variable that is incremented MUST also have a reset event.
+11. Do NOT emit same-tick or zero-horizon strategies; the effective holding horizon must be strictly positive.
+12. Short-horizon strategies MUST include an explicit `execution_policy` with conservative order lifetime and repricing limits.
+13. Do NOT pair near-zero holding horizons with passive repricing or rapid cancel/repost loops.
 
 ---
 
@@ -99,6 +102,8 @@ Comparison: `>`, `<`, `>=`, `<=`, `==`, `!=`
 4. **State variables that increment without reset cause permanent degradation.** If you increment `loss_streak` on `on_exit_loss`, you MUST also reset it on `on_exit_profit` or `on_flatten`. Otherwise guards/degradation rules that reference it will eventually permanently block entries.
 
 5. **Regime entry_policy_refs must have a global exit fail-safe.** Positions opened via regime-routed entries still need a global `close_all` exit. If the regime deactivates while holding a position, only global exit policies apply.
+
+6. **Same-tick and near-zero-horizon plans are unsafe.** Do not design plans whose effective holding horizon is 0-2 ticks, especially with passive placement, repeated repricing, or tiny cancel horizons. Short-horizon passive plans must leave meaningful queue dwell time and use conservative `cancel_after_ticks` and `max_reprices`.
 
 ---
 
@@ -215,3 +220,6 @@ This exit only fires when spread widens. Add a stop-loss or time exit using `pos
 - strength: range [0, 1]
 - unrealized_pnl_bps stop-loss: typically -10 to -50 bps
 - holding_ticks time exit: typically 30–200 ticks
+- zero-tick holding horizons are forbidden; do not emit same-tick strategies
+- if the horizon is intentionally short, prefer >= 10 ticks with an explicit conservative execution_policy
+- for short-horizon passive placement, prefer cancel_after_ticks >= 10 and max_reprices <= 2

@@ -147,6 +147,10 @@ def test_backtest_script_builds_states_and_runs_pipeline():
         assert (run_dir / "summary.json").exists()
         assert (run_dir / "realism_diagnostics.json").exists()
 
+        plots_dir = run_dir / "plots"
+        for name in {"dashboard.png", "intraday_cumulative_profit.png", "trade_timeline.png"}:
+            assert (plots_dir / name).exists()
+
         saved_summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
         for key in (
             "resample_interval",
@@ -208,6 +212,66 @@ def test_backtest_script_builds_states_and_runs_pipeline():
             assert bucket in diagnostics["cancel_reasons"]["shares"]
 
 
+def test_report_builder_writes_summary_before_generating_plots(monkeypatch):
+    backtest = _load_backtest_module()
+
+    with TemporaryDirectory() as data_tmp, TemporaryDirectory() as output_tmp:
+        data_dir = Path(data_tmp)
+        symbol = "005930"
+        date = "20260312"
+        day_dir = data_dir / symbol / date
+        day_dir.mkdir(parents=True, exist_ok=True)
+        _make_raw_csv(day_dir / "lob.csv", symbol=symbol, date=date)
+
+        states = backtest.build_states_for_range(
+            data_dir=data_dir,
+            symbol=symbol,
+            start_date=date,
+        )
+        output_dir = Path(output_tmp)
+        spec_path = _write_test_spec(output_dir)
+
+        from evaluation_orchestration.layer7_validation import BacktestConfig
+        from evaluation_orchestration.layer7_validation.report_builder import ReportBuilder
+        from strategy_block.strategy_specs.v2.schema_v2 import StrategySpecV2
+        from strategy_block.strategy_compiler import compile_strategy
+
+        seen: dict[str, bool] = {}
+
+        def _fake_generate_plots(run_dir: Path) -> None:
+            run_dir = Path(run_dir)
+            seen["summary_exists"] = (run_dir / "summary.json").exists()
+            seen["diagnostics_exists"] = (run_dir / "realism_diagnostics.json").exists()
+
+        monkeypatch.setattr(ReportBuilder, "_generate_plots", staticmethod(_fake_generate_plots))
+
+        config = BacktestConfig(
+            symbol=symbol,
+            start_date="2026-03-12",
+            end_date="2026-03-12",
+            initial_cash=1e8,
+            seed=123,
+            slicing_algo="TWAP",
+            placement_style="aggressive",
+            latency_ms=1.0,
+            fee_model="krx",
+            impact_model="linear",
+            compute_attribution=False,
+        )
+        strategy = compile_strategy(StrategySpecV2.load(spec_path))
+
+        backtest.run_backtest_with_states(
+            config=config,
+            states=states,
+            data_dir=str(data_dir),
+            output_dir=str(output_tmp),
+            strategy=strategy,
+        )
+
+        assert seen["summary_exists"] is True
+        assert seen["diagnostics_exists"] is True
+
+
 def test_backtest_config_from_cfg():
     backtest = _load_backtest_module()
 
@@ -217,7 +281,7 @@ def test_backtest_config_from_cfg():
             "seed": 99,
             "fee_model": "zero",
             "exchange_model": "partial_fill",
-            "queue_model": "none",
+            "queue_model": "prob_queue",
             "queue_position_assumption": 0.25,
         },
     }
@@ -229,7 +293,7 @@ def test_backtest_config_from_cfg():
     assert bc.seed == 99
     assert bc.fee_model == "zero"
     assert bc.exchange_model == "partial_fill"
-    assert bc.queue_model == "none"
+    assert bc.queue_model == "prob_queue"
     assert bc.queue_position_assumption == 0.25
 
 

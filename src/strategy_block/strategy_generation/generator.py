@@ -187,6 +187,7 @@ class StrategyGenerator:
         research_goal: str,
     ) -> tuple[StrategySpecV2, dict[str, Any]]:
         """Generate via OpenAI structured plan + lowering."""
+        from .v2.generation_rescue import GenerationRescue
         from .v2.openai_generation import generate_spec_v2_with_openai
         from .v2.utils.response_parser import PlanParseError
 
@@ -200,25 +201,59 @@ class StrategyGenerator:
                 reviewer=self._reviewer_v2,
             )
 
-            # Check review result
+            # Check review result (with exactly-one deterministic rescue attempt on eligible failures)
             if trace.get("static_review_passed") is False:
-                error_issues = trace.get("static_review", {}).get("issues", [])
-                error_descriptions = "; ".join(
-                    i["description"] for i in error_issues if i.get("severity") == "error"
+                pre_review = dict(trace.get("static_review") or {})
+                rescue_result = GenerationRescue().maybe_rescue(
+                    spec=spec,
+                    review_result=pre_review,
+                    backtest_environment=self.backtest_environment,
                 )
-                trace["generation_outcome"] = "failed"
-                trace = self._finalize_trace(
-                    trace=trace,
-                    requested_backend="openai",
-                    effective_backend="openai_v2",
-                    requested_mode=self.mode,
-                    effective_mode=self.mode,
-                    generation_class="openai_v2_plan",
-                )
-                raise StaticReviewError(
-                    f"OpenAI v2 spec '{spec.name}' failed static review: {error_descriptions}",
-                    trace=trace,
-                )
+                rescue_attempted = bool(rescue_result.metadata.get("eligible"))
+                trace["generation_rescue_attempted"] = rescue_attempted
+                trace["generation_rescue_applied"] = bool(rescue_result.applied)
+                trace["generation_rescue_operations"] = list(rescue_result.operations)
+                trace["rescue"] = {
+                    "attempted": rescue_attempted,
+                    "applied": bool(rescue_result.applied),
+                    "operations": list(rescue_result.operations),
+                    "reasons": list(rescue_result.reasons),
+                    "metadata": dict(rescue_result.metadata),
+                    "pre_review": pre_review,
+                }
+
+                if rescue_result.applied and isinstance(rescue_result.rescued_spec, StrategySpecV2):
+                    rescued_spec = rescue_result.rescued_spec
+                    post_rescue_review = self._reviewer_v2.review(
+                        rescued_spec,
+                        backtest_environment=self.backtest_environment,
+                    )
+                    trace["post_rescue_review"] = post_rescue_review.to_dict()
+                    trace["static_review"] = post_rescue_review.to_dict()
+                    trace["static_review_passed"] = post_rescue_review.passed
+                    if post_rescue_review.passed:
+                        spec = rescued_spec
+
+                if trace.get("static_review_passed") is False:
+                    error_issues = trace.get("static_review", {}).get("issues", [])
+                    error_descriptions = "; ".join(
+                        i.get("description", "") for i in error_issues if i.get("severity") == "error"
+                    )
+                    if not error_descriptions:
+                        error_descriptions = "unknown static review error"
+                    trace["generation_outcome"] = "failed"
+                    trace = self._finalize_trace(
+                        trace=trace,
+                        requested_backend="openai",
+                        effective_backend="openai_v2",
+                        requested_mode=self.mode,
+                        effective_mode=self.mode,
+                        generation_class="openai_v2_plan",
+                    )
+                    raise StaticReviewError(
+                        f"OpenAI v2 spec '{spec.name}' failed static review: {error_descriptions}",
+                        trace=trace,
+                    )
 
             trace["generation_outcome"] = "success"
             trace = self._finalize_trace(
@@ -230,7 +265,6 @@ class StrategyGenerator:
                 generation_class="openai_v2_plan",
             )
             return spec, trace
-
         except (PlanParseError, StaticReviewError) as e:
             # If it's already a StaticReviewError with trace, re-raise as-is
             if isinstance(e, StaticReviewError):

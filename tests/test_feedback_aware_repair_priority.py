@@ -84,7 +84,7 @@ def _feedback(
             "max_children_per_parent": max_children,
         },
         queue={
-            "queue_model": "risk_adverse",
+            "queue_model": "prob_queue",
             "maker_fill_ratio": maker_fill_ratio,
             "queue_blocked_count": queue_blocked,
             "blocked_miss_count": blocked_miss,

@@ -90,6 +90,12 @@ class TestSystemPromptContent:
         """Prompt warns that invalid plans will be rejected."""
         assert "rejected" in self.prompt.lower() or "REJECTED" in self.prompt
 
+    def test_zero_horizon_and_execution_policy_guardrails_present(self):
+        lower = self.prompt.lower()
+        assert "do not emit same-tick or zero-horizon strategies" in lower
+        assert "short-horizon strategies must include an explicit" in lower
+        assert "execution_policy" in lower
+
     def test_regime_exit_coverage_documented(self):
         assert "regime" in self.prompt.lower() and "global" in self.prompt.lower()
 
@@ -119,7 +125,7 @@ class TestUserPromptContent:
                     "order_ack_used_for_fill_gating": False,
                 },
                 "queue": {
-                    "queue_model": "risk_adverse",
+                    "queue_model": "prob_queue",
                     "queue_position_assumption": 0.5,
                 },
                 "semantics": {
@@ -154,7 +160,7 @@ class TestUserPromptContent:
         assert "order_submit_ms=5" in self.prompt
         assert "order_ack_ms=15" in self.prompt
         assert "cancel_ms=3" in self.prompt
-        assert "queue_model=risk_adverse" in self.prompt
+        assert "queue_model=prob_queue" in self.prompt
         assert "queue_position_assumption=0.5" in self.prompt
         assert "order_ack_used_for_fill_gating=False" in self.prompt
 
@@ -171,6 +177,8 @@ class TestUserPromptContent:
         assert "for short-horizon strategies, do not omit execution_policy." in lower
         assert "explicitly specify placement_mode, cancel_after_ticks, and max_reprices" in lower
         assert "may be treated as unsafe in review" in lower
+        assert "do not emit same-tick or zero-horizon strategies." in lower
+        assert "do not set the effective holding horizon to 0 ticks".lower() in lower
 
 
 # ===================================================================

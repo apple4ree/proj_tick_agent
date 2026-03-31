@@ -1,4 +1,4 @@
-# PIPELINE.md — Current Canonical Pipeline (Phase 4 Freeze)
+# PIPELINE.md — Current Canonical Pipeline (Phase 4 Freeze + PR5 Selection Discipline)
 
 이 문서는 **현재 동작 기준(Tier 1)** 파이프라인 계약을 설명한다. 과거 실험 기록은 historical analysis로 분리한다.
 
@@ -28,7 +28,7 @@
 ## End-to-End Flow (Current)
 
 ```
-generation -> review/repair -> backtest -> reporting/plots
+generation -> review/repair -> backtest -> walk-forward validation -> promotion gate/export -> reporting/plots
 ```
 
 ### 1) Generation
@@ -99,24 +99,99 @@ review artifact (llm-review/auto-repair 기본 저장):
 - `1s`
 - `500ms`
 
-### 4) Reporting / Visualization
+### 4) Walk-Forward Validation (PR2 + PR5 Selection Discipline Foundation)
+진입점:
+- `scripts/evaluate_walk_forward.py`
+
+핵심 구성:
+- deterministic window planner (`walk_forward/window_plan.py`)
+- rolling run harness (`walk_forward/harness.py`)
+- run-level score (`layer6_evaluator/selection_metrics.py`)
+- deterministic selector (`walk_forward/selector.py`)
+- report builder (`walk_forward/report.py`)
+
+selection score는 단일 PnL 기준이 아니라 다음을 함께 반영한다.
+- net edge quality
+- churn/turnover penalty
+- queue/cost fragility penalty
+- adverse-selection dominance penalty
+- family crowding / duplicate-neighbor / excessive same-family search에 대한 soft penalty foundation
+
+결과 산출물:
+- `outputs/walk_forward/<spec>/<trial|adhoc>/<scope>/walk_forward_report.json`
+- `outputs/selection_snapshots/<trial_or_spec>/selection_snapshot.json`
+
+### 4.5) Trial/Family Candidate Indexing + Trial Accounting (PR1~PR5 Foundation)
+
+구성:
+- `TrialRegistry` (`trial_registry.py`)
+- `TrialAccounting` (`trial_accounting.py`)
+- `LineageTracker` (`lineage.py`)
+- `FamilyFingerprintBuilder` (`family_fingerprint.py`)
+- `FamilyIndex` (`family_index.py`)
+- `FamilyAggregation` (`family_aggregation.py`)
+
+역할:
+- trial lineage 기록
+- coarse family grouping
+- near-duplicate/neighbor 후보 식별 기반 제공
+- registry snapshot 기반 total/family/stage/reject accounting
+- later multiple-testing control을 위한 file-based counting foundation 제공
+
+현재 의미:
+- walk-forward selector는 이 계층을 사용해 family crowding / duplicate proximity / excessive search pressure를 **soft penalty + audit trace**로 반영한다
+- promotion gate semantics 자체는 바꾸지 않고, promotion 이전 selection discipline만 강화한다
+
+### 4.6) Selection Snapshot Artifact (PR5)
+
+구성:
+- `walk_forward/selection_snapshot.py`
+- `walk_forward/report.py`
+
+역할:
+- selection decision trace를 promotion gate 이전에 file artifact로 고정
+- trial accounting snapshot / family context / duplicate lookup / per-window score summary 저장
+- aggregate score before/after family-aware selector penalty 저장
+
+주의:
+- 이것은 formal multiple testing correction이 아니라 audit / later analysis foundation이다
+- generation search space를 넓히지 않고 selection discipline만 강화한다
+
+### 4.8) Promotion Gate / Export Bundle (PR4)
+
+진입점:
+- `scripts/promote_candidate.py`
+
+핵심 구성:
+- deployment contract builder (`strategy_promotion/contract_builder.py`)
+- deterministic promotion gate (`strategy_promotion/promotion_gate.py`)
+- export bundle (`strategy_promotion/export_bundle.py`)
+
+산출물:
+- `outputs/promotion_reports/<trial_or_spec>/contract.json`
+- `outputs/promotion_reports/<trial_or_spec>/spec.json`
+- `outputs/promotion_reports/<trial_or_spec>/walk_forward_report.json`
+- `outputs/promotion_reports/<trial_or_spec>/bundle_manifest.json`
+
+주의:
+- PR4는 live execution이 아니라 handoff-ready artifact 계층이다.
+- live/paper/shadow trading 연결은 deferred scope.
+
+### 5) Reporting / Visualization
 ReportBuilder 산출물:
 - `summary.json` (compact 핵심 지표)
 - `realism_diagnostics.json` (상세 aggregate)
 - `signals.csv`, `orders.csv`, `fills.csv`, `pnl_series.csv`, `market_quotes.csv`
 - `plots/` static workflow
 
-현재 static plot set:
-- `overview.png`
-- `signal_analysis.png`
-- `execution_quality.png`
+현재 백테스트 자동 plot set:
 - `dashboard.png`
 - `intraday_cumulative_profit.png`
 - `trade_timeline.png`
-- `equity_risk.png`
-- `realism_dashboard.png`
 
-일부 artifact 누락 시 degraded/fallback plot을 저장하고 전체 생성은 유지한다.
+일부 artifact 누락 시 위 핵심 plot에 대해 degraded/fallback plot을 저장한다.
+
+확장 분석용 전체 plot set은 `scripts/internal/adhoc/visualize.py`를 수동 실행해 생성한다.
 
 ## Public CLI Surface (Current)
 
@@ -124,6 +199,8 @@ ReportBuilder 산출물:
 - `scripts/review_strategy.py`
 - `scripts/backtest.py`
 - `scripts/backtest_strategy_universe.py`
+- `scripts/evaluate_walk_forward.py`
+- `scripts/promote_candidate.py`
 - `scripts/run_generate_review_backtest.sh`
 
 세부 옵션은 `scripts/README.md`를 canonical source로 본다.
@@ -136,7 +213,7 @@ Phase 4에서 아래 계약을 baseline으로 고정했다.
 - review pipeline result contract
 - `summary.json` core field presence
 - `realism_diagnostics.json` core section/nested key presence
-- 핵심 plot 생성 계약 (`overview.png`, `trade_timeline.png`, `equity_risk.png`, `realism_dashboard.png`)
+- 핵심 plot 생성 계약 (`dashboard.png`, `intraday_cumulative_profit.png`, `trade_timeline.png`)
 
 참조:
 - `docs/analysis/benchmark_freeze_protocol.md`
@@ -151,6 +228,8 @@ Phase 4에서 아래 계약을 baseline으로 고정했다.
 - post-backtest feedback loop는 aggregate-only (raw CSV trace 주입 없음)
 - full universe operational guarantee는 freeze scope 밖
 - live/replay LLM runtime variance 존재 (mock mode가 deterministic baseline)
+- PR5로 family-aware trial accounting / duplicate-aware selection / selection snapshot foundation은 추가되었지만, formal multiple testing correction은 여전히 deferred
+- live/paper/shadow trading 연결은 PR4 범위 밖 (promotion artifact만 제공)
 
 ## Related Docs
 

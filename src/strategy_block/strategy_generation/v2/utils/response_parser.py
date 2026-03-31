@@ -18,6 +18,13 @@ _SHORT_STYLE_HINTS: frozenset[str] = frozenset({
     "scalping",
     "execution_adaptive",
 })
+_PASSIVE_MODES: frozenset[str] = frozenset({
+    "passive_join",
+    "passive_only",
+    "passive_aggressive",
+})
+_SHORT_MIN_CANCEL_AFTER_TICKS = 10
+_SHORT_MAX_REPRICES = 2
 
 
 class PlanParseError(ValueError):
@@ -63,6 +70,42 @@ def parse_plan_response(response: Any) -> StrategyPlan:
     )
 
 
+def collect_pre_review_flags(plan: StrategyPlan) -> dict[str, Any]:
+    """Collect deterministic pre-review risk flags from a parsed plan."""
+    holding_horizon = _infer_holding_horizon_ticks(plan)
+    style_hint = str(plan.strategy_style or "").strip().lower()
+    style_short_horizon = style_hint in _SHORT_STYLE_HINTS
+    fast_entry_cooldown = any(0 < ep.cooldown_ticks <= _SHORT_HORIZON_HOLDING_TICKS for ep in plan.entry_policies)
+
+    inferred_short_horizon = (
+        (holding_horizon is not None and holding_horizon <= _SHORT_HORIZON_HOLDING_TICKS)
+        or (holding_horizon is None and style_short_horizon and fast_entry_cooldown)
+    )
+
+    execution_policy_explicit = plan.execution_policy is not None
+    invalid_zero_horizon = holding_horizon is not None and holding_horizon <= 0
+
+    aggressive_passive_short_horizon = False
+    if inferred_short_horizon and plan.execution_policy is not None:
+        is_passive = plan.execution_policy.placement_mode in _PASSIVE_MODES
+        if is_passive:
+            aggressive_passive_short_horizon = (
+                plan.execution_policy.max_reprices > _SHORT_MAX_REPRICES
+                or plan.execution_policy.cancel_after_ticks < _SHORT_MIN_CANCEL_AFTER_TICKS
+            )
+
+    return {
+        "execution_policy_explicit": execution_policy_explicit,
+        "inferred_holding_horizon_ticks": holding_horizon,
+        "inferred_short_horizon": inferred_short_horizon,
+        "execution_policy_missing_short_horizon": (
+            (not execution_policy_explicit) and inferred_short_horizon
+        ),
+        "invalid_zero_horizon": invalid_zero_horizon,
+        "aggressive_passive_short_horizon": aggressive_passive_short_horizon,
+    }
+
+
 def validate_plan(plan: StrategyPlan) -> list[str]:
     """Run basic semantic validation on a parsed plan. Returns list of warnings."""
     warnings: list[str] = []
@@ -103,13 +146,26 @@ def validate_plan(plan: StrategyPlan) -> list[str]:
                         f"State event '{event.name}' updates undefined var '{upd.var}'"
                     )
 
-    holding_horizon = _infer_holding_horizon_ticks(plan)
+    flags = collect_pre_review_flags(plan)
+    holding_horizon = flags["inferred_holding_horizon_ticks"]
     style_hint = str(plan.strategy_style or "").strip().lower()
     style_short_horizon = style_hint in _SHORT_STYLE_HINTS
     fast_entry_cooldown = any(0 < ep.cooldown_ticks <= _SHORT_HORIZON_HOLDING_TICKS for ep in plan.entry_policies)
 
+    if flags["invalid_zero_horizon"]:
+        warnings.append(
+            "Plan has non-positive holding_ticks horizon; same-tick/zero-horizon behavior is unsafe "
+            f"(holding_ticks={holding_horizon})"
+        )
+
+    if flags["aggressive_passive_short_horizon"] and plan.execution_policy is not None:
+        warnings.append(
+            "Short-horizon passive execution_policy appears aggressive; "
+            "reduce max_reprices and/or increase cancel_after_ticks"
+        )
+
     if plan.execution_policy is None:
-        if holding_horizon is not None and holding_horizon <= _SHORT_HORIZON_HOLDING_TICKS:
+        if flags["execution_policy_missing_short_horizon"]:
             warnings.append(
                 "Short-horizon plan has no execution_policy; static review may treat this as unsafe "
                 f"(holding_ticks={holding_horizon}, threshold={_SHORT_HORIZON_HOLDING_TICKS})"

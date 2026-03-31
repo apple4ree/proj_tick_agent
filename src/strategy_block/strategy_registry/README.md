@@ -1,50 +1,87 @@
-# strategy_registry/ — 전략 Spec 저장소
+# strategy_registry/ — Spec 저장 + Trial/Family 후보 인덱스
 
-StrategySpecV2와 메타데이터를 파일 시스템에 저장하고 상태(lifecycle)를 관리한다.
+`strategy_registry`는 세 계층을 함께 제공한다.
+
+1. **Spec Registry (`registry.py`)**
+- `StrategySpecV2` + metadata 저장/상태전이
+- execution gate 체크
+
+2. **Candidate Tracking Foundation (PR1~PR3)**
+- `trial_registry.py`: trial record/stage/status 저장
+- `lineage.py`: parent-child lineage graph
+- `family_fingerprint.py`: deterministic coarse family fingerprint
+- `family_index.py`: family member 관리 + duplicate/neighbor 탐색
+
+3. **Selection Discipline Foundation (PR5)**
+- `trial_accounting.py`: registry snapshot 기반 trial/family/stage/reject 집계
+- walk-forward selector가 읽을 family crowding / duplicate search pressure foundation
+- selection snapshot artifact의 audit input foundation
 
 ## 핵심 역할
 
-- `{name}_v{version}.json` + `.meta.json` 쌍으로 spec/metadata 저장
-- 상태 전이 관리: DRAFT → REVIEWED → APPROVED → PROMOTED_TO_BACKTEST → ...
-- 실행 게이트 체크: static review 통과 + 적절한 상태 확인 후 spec 로드 허용
-- 버전 조회, 최신 승인 버전 탐색
+- `{name}_v{version}.json` + `.meta.json` spec lifecycle 관리
+- trial 단위 후보 추적(`DRAFT/REVIEWED/APPROVED/BACKTESTED/WF_PASSED/PROMOTION_CANDIDATE/CONTRACT_EXPORTED/HANDOFF_READY`)
+- family id 기반 후보군 압축을 위한 deterministic coarse grouping
+- duplicate/neighbor lookup + trial accounting 기반 selection discipline foundation 제공
 
-## 대표 파일
+## Family Fingerprint (PR3)
 
-| 파일 | 역할 |
-|------|------|
-| `registry.py` | `StrategyRegistry` — 파일 기반 CRUD, 상태 전이, execution gate |
-| `models.py` | `StrategyMetadata`, `StrategyStatus` 열거형, 유효 전이 규칙 |
+`FamilyFingerprintBuilder`는 spec에서 아래 축을 추출한다.
 
-## 상태 흐름
+- `motif`
+- `side_model`
+- `execution_style`
+- `horizon_bucket`
+- `regime_shape`
+- `feature_signature`
 
-```
-DRAFT → REVIEWED → APPROVED → PROMOTED_TO_BACKTEST → PROMOTED_TO_LIVE → ARCHIVED
-```
+`family_id`는 spec 이름/버전 문자열이 아니라 coarse structural signature 해시를 사용한다.
 
-`VALID_TRANSITIONS` DAG가 허용된 전이만 정의한다.
+## Family Index (PR3)
 
-## 주요 API
+`FamilyIndex`는 file-based JSON 저장을 사용한다.
 
-- `save_spec(spec, metadata)` — spec + metadata 저장
-- `load_spec(name, version)` — spec JSON 로드
-- `get_metadata(name, version)` — metadata 조회
-- `update_status(name, version, new_status)` — 상태 전이
-- `check_execution_gate(name, version)` — static review + 상태 확인
-- `load_spec_for_execution(name, version)` — gate 체크 + 컴파일
-- `latest_approved(name)` — 최신 승인 버전 조회
+- 기본 저장 경로: `outputs/trials/family_index`
+- `upsert()`: family member 병합
+- `list_members()`: family 구성원 조회
+- `find_duplicate_or_neighbor()`: similarity 기반 duplicate/neighbor 후보 탐색
 
-## 전체 파이프라인에서의 위치
+`strategies/`를 operational family index 저장소로 사용하지 않는다.
 
-Generation이 spec을 여기에 저장하고, Worker/CLI가 여기서 spec을 로드하여 백테스트를 실행한다. 실제 저장 경로는 `strategies/` 디렉토리.
+## Trial Registry / Accounting (PR5)
 
-## 주의사항
+`TrialRecord.family_id`는 first-class field이며,
+`TrialRegistry.attach_family()`로 trial에 family를 연결할 수 있다.
 
-- 파일 직접 편집 시 metadata와 불일치 가능
-- `conf/paths.yaml`의 `registry_dir`이 저장 경로를 결정
-- Worker는 `check_execution_gate()`를 호출하여 승인되지 않은 spec 실행을 방지
+`TrialRegistry.list_all()` / `list_active()`는 selector/report 계층이 registry snapshot을 deterministic하게 읽을 수 있게 한다.
+
+`TrialAccounting`은 아래 집계를 제공한다.
+
+- total / active / rejected trial count
+- family별 total / active trial count
+- stage count
+- reject reason count
+
+이 계층은 DB나 별도 통계 인프라 없이 file-based registry snapshot만으로 동작한다.
+
+## 현재 의미
+
+PR5 이후 walk-forward selection은 family-aware trial accounting을 **soft penalty + decision trace**로 사용한다.
+
+목적은 더 많은 전략을 고르는 것이 아니라,
+같은 family를 과도하게 반복 시도해서 생기는 selection 착시를 조금 더 일찍 불리하게 만드는 것이다.
+
+`selection_snapshot.json`은 promotion gate 이전 단계의 decision trace artifact다.
+
+## 아직 범위 밖 (Deferred)
+
+- formal multiple testing correction
+- novelty-guided generation coupling
+- live/paper/shadow trading 연결
+- DB-backed registry / statistical warehouse
 
 ## 관련 문서
 
-- [../../../../strategies/README.md](../../../../strategies/README.md) — 실제 저장소 디렉토리
-- [../strategy_review/README.md](../strategy_review/README.md) — review 결과가 metadata에 반영
+- `../strategy_generation/README.md`
+- `../strategy_review/README.md`
+- `../../../../PIPELINE.md`

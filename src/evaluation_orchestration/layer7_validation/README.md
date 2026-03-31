@@ -19,6 +19,7 @@ baseline/회귀 기준은 Tier 2 freeze 문서를 따른다.
 - `report_builder.py` (`ReportBuilder`)
 - `component_factory.py` (`ComponentFactory`)
 - `reproducibility.py` (`ReproducibilityManager`)
+- `walk_forward/` (`WalkForwardWindowPlanner`, `WalkForwardHarness`, `WalkForwardSelector`, `WalkForwardReportBuilder`)
 
 ## Current Realism Stack (Canonical)
 
@@ -91,19 +92,41 @@ baseline/회귀 기준은 Tier 2 freeze 문서를 따른다.
 - always-on aggregate 중심
 - per-order full trace는 diagnostics 계약 범위 밖
 
+## Walk-Forward Validation (PR2)
+
+PR2에서 단일 run 위에 rolling window 평가 계층이 추가됐다.
+
+- window planning: `walk_forward/window_plan.py`
+- 실행 하네스: `walk_forward/harness.py`
+- run scoring: `layer6_evaluator/selection_metrics.py`
+- aggregate decision: `walk_forward/selector.py`
+- report output: `walk_forward/report.py`
+
+selection score는 단순 PnL rank가 아니라 아래를 함께 반영한다.
+- net edge quality (`net_pnl`, pnl-per-parent/fill proxy)
+- churn/turnover penalty (`child_order_count`, `children_per_parent`, `cancel_rate`)
+- queue/cost fragility penalty (`maker_fill_ratio`, `queue_blocked_count`, `blocked_miss_count`, 비용 항목)
+- adverse-selection dominance penalty
+
+기본 산출물:
+- `outputs/walk_forward/<spec>/<trial|adhoc>/<scope>/walk_forward_report.json`
+
+CLI 진입점:
+- `scripts/evaluate_walk_forward.py`
+
 ## Visualization (Static Workflow)
 
-현재 plot 산출물:
-- `overview.png`
-- `signal_analysis.png`
-- `execution_quality.png`
+백테스트 후 자동 생성되는 핵심 plot:
 - `dashboard.png`
-- `intraday_cumulative_profit.png`
+- `intraday_cumulative_profit.png` (intraday cumulative PnL line chart + 하단 key metrics text box)
 - `trade_timeline.png`
-- `equity_risk.png`
-- `realism_dashboard.png`
 
-artifact 누락 시 degraded fallback plot을 저장하고 전체 생성은 유지한다.
+`intraday_cumulative_profit.png`는 `summary.json`이 있으면 Net PnL/Sharpe/Max DD/Fill·Cancel Rate 중심 요약을 하단 text box로 표시하고,
+`summary.json`이 없으면 `Summary metrics unavailable`로 degraded 표시한다.
+
+artifact 누락 시 위 핵심 plot에 대해 degraded fallback을 저장한다.
+
+추가 분석이 필요하면 `scripts/internal/adhoc/visualize.py`로 전체 extended plot set을 별도 생성할 수 있다.
 
 ## Freeze Reference
 
@@ -117,3 +140,4 @@ Phase 4 snapshot:
 - deeper queue instrumentation beyond aggregate deferred
 - feedback loop는 aggregate-only
 - full universe operational guarantee는 freeze scope 밖
+- walk-forward는 family dedupe/fingerprint, promotion contract를 아직 포함하지 않음

@@ -69,7 +69,7 @@ def test_backtest_feedback_summary_contract_valid():
     feedback = BacktestFeedbackSummary(
         feedback_available=True,
         lifecycle={"signal_count": 1.0, "child_order_count": 2.0},
-        queue={"queue_model": "risk_adverse", "blocked_miss_count": 3.0},
+        queue={"queue_model": "prob_queue", "blocked_miss_count": 3.0},
         cancel_reasons={"adverse_selection_share": 0.7},
         cost={"net_pnl": -1.0, "total_commission": 2.0},
         context={"resample": "500ms", "canonical_tick_interval_ms": 500.0},

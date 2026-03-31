@@ -1,0 +1,22 @@
+promotion:
+  gate:
+    min_aggregate_score: -0.10
+    min_valid_windows: 3
+    min_forward_survival_ratio: 0.67
+    max_churn_heavy_share: 0.5
+    max_cost_dominated_share: 0.6
+    max_adverse_selection_dominated_share: 0.6
+    max_queue_ineffective_share: 0.6
+  contract:
+    required_monitoring_metrics:
+      - aggregate_score
+      - n_pass_windows
+      - children_per_parent
+      - cancel_rate
+      - maker_fill_ratio
+      - queue_blocked_count
+      - blocked_miss_count
+      - adverse_selection_share
+      - total_commission
+      - total_slippage
+      - total_impact
