@@ -108,7 +108,6 @@ def test_generation_review_backtest_smoke_freeze_path():
             placement_style="spread_adaptive",
             latency_ms=100.0,
             fee_model="krx",
-            impact_model="linear",
             exchange_model="partial_fill",
             queue_model="prob_queue",
             queue_position_assumption=0.5,

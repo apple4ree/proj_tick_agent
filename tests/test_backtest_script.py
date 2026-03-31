@@ -125,7 +125,6 @@ def test_backtest_script_builds_states_and_runs_pipeline():
             placement_style="aggressive",
             latency_ms=1.0,
             fee_model="krx",
-            impact_model="linear",
             compute_attribution=False,
         )
         strategy = compile_strategy(StrategySpecV2.load(spec_path))
@@ -255,7 +254,6 @@ def test_report_builder_writes_summary_before_generating_plots(monkeypatch):
             placement_style="aggressive",
             latency_ms=1.0,
             fee_model="krx",
-            impact_model="linear",
             compute_attribution=False,
         )
         strategy = compile_strategy(StrategySpecV2.load(spec_path))

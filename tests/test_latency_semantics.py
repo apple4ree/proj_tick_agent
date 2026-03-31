@@ -9,7 +9,6 @@ from evaluation_orchestration.layer7_validation.fill_simulator import FillSimula
 from evaluation_orchestration.layer6_evaluator.pnl_ledger import PnLLedger
 from market_simulation.layer5_simulator.bookkeeper import Bookkeeper
 from market_simulation.layer5_simulator.fee_model import ZeroFeeModel
-from market_simulation.layer5_simulator.impact_model import ZeroImpact
 from market_simulation.layer5_simulator.latency_model import LatencyModel, LatencyProfile
 from market_simulation.layer5_simulator.matching_engine import ExchangeModel, MatchingEngine
 from market_simulation.layer5_simulator.order_book import OrderBookSimulator
@@ -34,7 +33,6 @@ def _build_fill_simulator(profile: LatencyProfile) -> FillSimulator:
         order_book=OrderBookSimulator(),
         latency_model=LatencyModel(profile=profile, add_jitter=False),
         fee_model=ZeroFeeModel(),
-        impact_model=ZeroImpact(),
         bookkeeper=Bookkeeper(initial_cash=1e8),
         pnl_ledger=PnLLedger(),
         queue_model="none",

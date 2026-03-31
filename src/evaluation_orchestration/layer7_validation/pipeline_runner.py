@@ -762,7 +762,6 @@ class PipelineRunner:
         matching_engine = ComponentFactory.build_matching_engine(config.exchange, seed=config.seed)
         latency_model = ComponentFactory.build_latency_model(config.latency, seed=config.seed)
         fee_model = ComponentFactory.build_fee_model(config.fee)
-        impact_model = ComponentFactory.build_impact_model(config.impact)
         queue_model = ComponentFactory.normalize_queue_model(config.exchange.queue_model)
 
         self._fill_simulator = FillSimulator(
@@ -770,7 +769,6 @@ class PipelineRunner:
             order_book=order_book,
             latency_model=latency_model,
             fee_model=fee_model,
-            impact_model=impact_model,
             bookkeeper=self._bookkeeper,
             pnl_ledger=self._pnl_ledger,
             queue_model=queue_model,

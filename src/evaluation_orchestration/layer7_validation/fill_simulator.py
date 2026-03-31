@@ -80,7 +80,6 @@ class FillSimulator:
         order_book,
         latency_model,
         fee_model,
-        impact_model,
         bookkeeper,
         pnl_ledger,
         queue_model: str = "prob_queue",
@@ -91,7 +90,6 @@ class FillSimulator:
         self._order_book = order_book
         self._latency_model = latency_model
         self._fee_model = fee_model
-        self._impact_model = impact_model
         self._bookkeeper = bookkeeper
         self._pnl_ledger = pnl_ledger
         self._queue_model = (queue_model or "prob_queue").strip().lower()
@@ -265,7 +263,6 @@ class FillSimulator:
             return fills
 
         self._order_book.update(state.lob)
-        adv_proxy = max(1.0, float(state.lob.total_bid_depth + state.lob.total_ask_depth))
 
         for child in child_orders:
             # Parent-level overfill guard: stop filling once parent is complete
@@ -351,14 +348,8 @@ class FillSimulator:
             # Final guard: clamp to parent remaining
             filled_qty = min(filled_qty, parent.remaining_qty)
 
-            impacted_price = self._impact_model.adjust_price(
-                base_price=matched_price,
-                qty=filled_qty,
-                adv=adv_proxy,
-                mid=mid,
-                side=child.side,
-            )
-            impact_bps = abs((impacted_price - matched_price) / mid) * 10_000.0 if mid else 0.0
+            impacted_price = matched_price
+            impact_bps = 0.0
             slippage_bps = self._compute_slippage_bps(child.arrival_mid or mid, impacted_price, child.side)
             fee = self._fee_model.compute(
                 qty=filled_qty,

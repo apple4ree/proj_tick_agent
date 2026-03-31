@@ -9,7 +9,6 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
 from evaluation_orchestration.layer7_validation.backtest_config import (
     FeeConfig,
-    ImpactConfig,
     LatencyConfig,
     ExchangeConfig,
     SlicingConfig,
@@ -40,36 +39,6 @@ class TestBuildFeeModel:
         model = ComponentFactory.build_fee_model(cfg)
         from market_simulation.layer5_simulator.fee_model import ZeroFeeModel
         assert isinstance(model, ZeroFeeModel)
-
-
-class TestBuildImpactModel:
-    """ComponentFactory.build_impact_model()을 테스트한다."""
-
-    def test_linear_default(self):
-        cfg = ImpactConfig()
-        model = ComponentFactory.build_impact_model(cfg)
-        assert model.eta == 0.1
-        assert model.gamma == 0.01
-
-    def test_linear_custom(self):
-        cfg = ImpactConfig(type="linear", eta=0.2, gamma=0.02)
-        model = ComponentFactory.build_impact_model(cfg)
-        assert model.eta == 0.2
-        assert model.gamma == 0.02
-
-    def test_sqrt(self):
-        cfg = ImpactConfig(type="sqrt", sigma=0.02, kappa=0.15)
-        model = ComponentFactory.build_impact_model(cfg)
-        from market_simulation.layer5_simulator.impact_model import SquareRootImpact
-        assert isinstance(model, SquareRootImpact)
-        assert model.sigma == 0.02
-        assert model.kappa == 0.15
-
-    def test_zero(self):
-        cfg = ImpactConfig(type="zero")
-        model = ComponentFactory.build_impact_model(cfg)
-        from market_simulation.layer5_simulator.impact_model import ZeroImpact
-        assert isinstance(model, ZeroImpact)
 
 
 class TestBuildLatencyModel:

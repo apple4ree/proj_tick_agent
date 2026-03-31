@@ -55,7 +55,6 @@ class InstrumentedPipelineRunner(PipelineRunner):
             order_book                = fs._order_book,
             latency_model             = fs._latency_model,
             fee_model                 = fs._fee_model,
-            impact_model              = fs._impact_model,
             bookkeeper                = fs._bookkeeper,
             pnl_ledger                = fs._pnl_ledger,
             queue_model               = fs._queue_model,

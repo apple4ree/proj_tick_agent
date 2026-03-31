@@ -161,7 +161,6 @@ def test_summary_and_diagnostics_contract_freeze_keys_exist():
             placement_style="spread_adaptive",
             latency_ms=100.0,
             fee_model="krx",
-            impact_model="linear",
             exchange_model="partial_fill",
             queue_model="prob_queue",
             queue_position_assumption=0.5,

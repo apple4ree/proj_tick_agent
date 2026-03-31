@@ -15,7 +15,6 @@ if str(SRC_ROOT) not in sys.path:
 
 from execution_planning.layer3_order.order_types import OrderSide
 from market_simulation.layer5_simulator.fee_model import KRXFeeModel, ZeroFeeModel
-from market_simulation.layer5_simulator.impact_model import LinearImpact, SquareRootImpact, ZeroImpact
 
 
 # ── 수수료 모델s ────────────────────────────────────────────────────
@@ -70,49 +69,3 @@ class TestZeroFeeModel:
         assert fee.compute_bps(100, 50000, OrderSide.BUY, False) == 0.0
 
 
-# ── Impact Models ─────────────────────────────────────────────────
-
-class TestLinearImpact:
-    def test_temporary_increases_with_qty(self):
-        model = LinearImpact(eta=0.1)
-        impact_small = model.temporary_impact(qty=10, adv=10000, mid=50000)
-        impact_large = model.temporary_impact(qty=1000, adv=10000, mid=50000)
-        assert impact_large > impact_small
-
-    def test_zero_adv_returns_zero(self):
-        model = LinearImpact()
-        assert model.temporary_impact(qty=100, adv=0, mid=50000) == 0.0
-
-    def test_adjust_price_buy_increases(self):
-        model = LinearImpact(eta=0.1)
-        base = 50000.0
-        adjusted = model.adjust_price(base, qty=100, adv=10000, mid=50000, side=OrderSide.BUY)
-        assert adjusted > base
-
-    def test_adjust_price_sell_decreases(self):
-        model = LinearImpact(eta=0.1)
-        base = 50000.0
-        adjusted = model.adjust_price(base, qty=100, adv=10000, mid=50000, side=OrderSide.SELL)
-        assert adjusted < base
-
-
-class TestSquareRootImpact:
-    def test_temporary_scales_sublinearly(self):
-        model = SquareRootImpact(sigma=0.01, kappa=0.1)
-        i1 = model.temporary_impact(qty=100, adv=10000, mid=50000)
-        i4 = model.temporary_impact(qty=400, adv=10000, mid=50000)
-        # sqrt scaling: 4x qty → 2x impact
-        assert i4 == pytest.approx(2 * i1, rel=0.01)
-
-    def test_zero_qty_returns_zero(self):
-        model = SquareRootImpact()
-        assert model.temporary_impact(qty=0, adv=10000, mid=50000) == 0.0
-
-
-class TestZeroImpact:
-    def test_all_zero(self):
-        model = ZeroImpact()
-        assert model.temporary_impact(100, 10000, 50000) == 0.0
-        assert model.permanent_impact(100, 10000, 50000) == 0.0
-        base = 50000.0
-        assert model.adjust_price(base, 100, 10000, 50000, OrderSide.BUY) == base

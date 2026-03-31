@@ -8,7 +8,6 @@ from evaluation_orchestration.layer7_validation.fill_simulator import FillSimula
 from execution_planning.layer3_order.order_types import ChildOrder, OrderSide, OrderTIF, OrderType, ParentOrder
 from market_simulation.layer5_simulator.bookkeeper import Bookkeeper
 from market_simulation.layer5_simulator.fee_model import ZeroFeeModel
-from market_simulation.layer5_simulator.impact_model import ZeroImpact
 from market_simulation.layer5_simulator.latency_model import LatencyModel, LatencyProfile
 from market_simulation.layer5_simulator.matching_engine import ExchangeModel, MatchingEngine, QueueModel
 from market_simulation.layer5_simulator.order_book import OrderBookSimulator
@@ -67,7 +66,6 @@ def _build_fill_simulator(
         order_book=OrderBookSimulator(),
         latency_model=LatencyModel(profile=LatencyProfile.zero(), add_jitter=False),
         fee_model=ZeroFeeModel(),
-        impact_model=ZeroImpact(),
         bookkeeper=Bookkeeper(initial_cash=1e8),
         pnl_ledger=PnLLedger(),
         queue_model=queue_model_name,

@@ -14,9 +14,9 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from execution_planning.layer2_position import RiskCaps, TargetBuilder
     from execution_planning.layer4_execution import SlicingPolicy, PlacementPolicy
-    from market_simulation.layer5_simulator import FeeModel, ImpactModel, LatencyModel, MatchingEngine
+    from market_simulation.layer5_simulator import FeeModel, LatencyModel, MatchingEngine
     from evaluation_orchestration.layer7_validation.backtest_config import (
-        FeeConfig, ImpactConfig, LatencyConfig, ExchangeConfig,
+        FeeConfig, LatencyConfig, ExchangeConfig,
         SlicingConfig, PlacementConfig, RiskConfig,
     )
 
@@ -58,43 +58,6 @@ class ComponentFactory:
             commission_bps=cfg.commission_bps,
             market=cfg.market,
             include_tax=cfg.include_tax,
-        )
-
-    # ------------------------------------------------------------------
-    # Impact Model
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def build_impact_model(cfg: "ImpactConfig") -> "ImpactModel":
-        """
-        Build a market impact model from ImpactConfig.
-
-        매개변수
-        ----------
-        cfg : ImpactConfig
-            Impact configuration with type, eta, gamma, sigma, kappa.
-
-        반환값
-        -------
-        ImpactModel
-            LinearImpact, SquareRootImpact, or ZeroImpact instance.
-        """
-        from market_simulation.layer5_simulator.impact_model import LinearImpact, SquareRootImpact, ZeroImpact
-
-        if cfg.type == "zero":
-            return ZeroImpact()
-
-        if cfg.type == "sqrt":
-            return SquareRootImpact(
-                sigma=cfg.sigma,
-                kappa=cfg.kappa,
-                gamma=cfg.gamma,
-            )
-
-        # Default: linear
-        return LinearImpact(
-            eta=cfg.eta,
-            gamma=cfg.gamma,
         )
 
     # ------------------------------------------------------------------

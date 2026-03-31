@@ -29,7 +29,6 @@ backtest:
   # This alias must NOT be used to derive market_data_delay_ms.
   latency_ms: 100.0
   fee_model: krx
-  impact_model: linear
   slicing_algo: TWAP
   placement_style: spread_adaptive
   exchange_model: partial_fill

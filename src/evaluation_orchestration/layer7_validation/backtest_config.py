@@ -40,23 +40,6 @@ class FeeConfig:
 
 
 @dataclass
-class ImpactConfig:
-    """Market impact model configuration."""
-    type: str = "linear"     # linear | sqrt | zero
-    eta: float = 0.1         # LinearImpact 일시적 계수
-    gamma: float = 0.01      # Permanent impact coefficient (linear & sqrt)
-    sigma: float = 0.01      # Volatility (SquareRootImpact)
-    kappa: float = 0.1       # Temporary coefficient (SquareRootImpact)
-
-    def to_dict(self) -> dict:
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, d: dict) -> ImpactConfig:
-        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
-
-
-@dataclass
 class LatencyConfig:
     """지연 model configuration."""
     profile: str = "default"                    # default | zero | colocation | retail
@@ -188,8 +171,6 @@ class BacktestConfig:
         this alias is fully disabled.
     fee_model : str
         'krx' | 'zero' | 'flat_bps' (flat)
-    impact_model : str
-        'linear' | 'sqrt' | 'zero' (flat)
     exchange_model : str
         'partial_fill' | 'no_partial_fill' (flat)
     queue_model : str
@@ -204,7 +185,6 @@ class BacktestConfig:
     Nested Configs (optional, override flat fields when provided)
     -------------------------------------------------------------
     fee : FeeConfig
-    impact : ImpactConfig
     latency : LatencyConfig
     exchange : ExchangeConfig
     slicing : SlicingConfig
@@ -225,7 +205,6 @@ class BacktestConfig:
     placement_style: str = "spread_adaptive"
     latency_ms: float = 1.0
     fee_model: str = "krx"
-    impact_model: str = "linear"
     exchange_model: str = "partial_fill"
     queue_model: str = "prob_queue"
     queue_position_assumption: float = 0.5
@@ -248,7 +227,6 @@ class BacktestConfig:
 
     # --- Nested configs (qlib-style) ---
     fee: FeeConfig | None = field(default=None)
-    impact: ImpactConfig | None = field(default=None)
     latency: LatencyConfig | None = field(default=None)
     exchange: ExchangeConfig | None = field(default=None)
     slicing: SlicingConfig | None = field(default=None)
@@ -279,8 +257,6 @@ class BacktestConfig:
         """Synthesize nested configs from flat fields if not provided."""
         if self.fee is None:
             self.fee = FeeConfig(type=self.fee_model)
-        if self.impact is None:
-            self.impact = ImpactConfig(type=self.impact_model)
 
         alias_submit_ms, alias_ack_ms, alias_cancel_ms = self.latency_alias_components(self.latency_ms)
         self._latency_alias_applied = False
@@ -325,12 +301,6 @@ class BacktestConfig:
             errors.append(f"fee.market must be 'KOSPI' or 'KOSDAQ', got '{self.fee.market}'")
         if self.fee.commission_bps < 0:
             errors.append(f"fee.commission_bps must be >= 0, got {self.fee.commission_bps}")
-
-        # Impact config
-        if self.impact.type not in {"linear", "sqrt", "zero"}:
-            errors.append(f"impact.type must be 'linear', 'sqrt', or 'zero', got '{self.impact.type}'")
-        if self.impact.eta < 0:
-            errors.append(f"impact.eta must be >= 0, got {self.impact.eta}")
 
         # 지연 config
         if self.latency.profile not in {"default", "zero", "colocation", "retail"}:
@@ -399,7 +369,6 @@ class BacktestConfig:
             "placement_style": self.placement_style,
             "latency_ms": self.latency_ms,
             "fee_model": self.fee_model,
-            "impact_model": self.impact_model,
             "exchange_model": self.exchange_model,
             "queue_model": self.queue_model,
             "queue_position_assumption": self.queue_position_assumption,
@@ -410,7 +379,6 @@ class BacktestConfig:
             "annualization_factor": self.annualization_factor,
             # Nested configs
             "fee": self.fee.to_dict() if self.fee else None,
-            "impact": self.impact.to_dict() if self.impact else None,
             "latency": self.latency.to_dict() if self.latency else None,
             "exchange": self.exchange.to_dict() if self.exchange else None,
             "slicing": self.slicing.to_dict() if self.slicing else None,
@@ -442,7 +410,7 @@ class BacktestConfig:
                 d[field_name] = type_fn(d[field_name])
 
         # Extract nested configs if present
-        nested_keys = ["fee", "impact", "latency", "exchange", "slicing", "placement", "risk"]
+        nested_keys = ["fee", "latency", "exchange", "slicing", "placement", "risk"]
         nested: dict[str, Any] = {}
         for key in nested_keys:
             if key in d and isinstance(d[key], dict):
@@ -451,8 +419,6 @@ class BacktestConfig:
         # Build nested config objects
         if "fee" in nested:
             d["fee"] = FeeConfig.from_dict(nested["fee"])
-        if "impact" in nested:
-            d["impact"] = ImpactConfig.from_dict(nested["impact"])
         if "latency" in nested:
             d["latency"] = LatencyConfig.from_dict(nested["latency"])
         if "exchange" in nested:

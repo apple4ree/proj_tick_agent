@@ -13,7 +13,6 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 from evaluation_orchestration.layer7_validation.backtest_config import (
     BacktestConfig,
     FeeConfig,
-    ImpactConfig,
     LatencyConfig,
     ExchangeConfig,
     SlicingConfig,
@@ -35,7 +34,6 @@ class TestFlatConstruction:
         assert cfg.initial_cash == 1e8
         assert cfg.seed == 42
         assert cfg.fee.type == "krx"
-        assert cfg.impact.type == "linear"
 
     def test_flat_fields_propagate_to_nested(self):
         cfg = BacktestConfig(
@@ -43,14 +41,12 @@ class TestFlatConstruction:
             start_date="2026-03-13",
             end_date="2026-03-13",
             fee_model="zero",
-            impact_model="sqrt",
             slicing_algo="POV",
             placement_style="aggressive",
             queue_model="prob_queue",
             queue_position_assumption=0.3,
         )
         assert cfg.fee.type == "zero"
-        assert cfg.impact.type == "sqrt"
         assert cfg.slicing.algo == "POV"
         assert cfg.placement.style == "aggressive"
         assert cfg.exchange.queue_model == "prob_queue"
@@ -69,17 +65,6 @@ class TestNestedConstruction:
         )
         assert cfg.fee.commission_bps == 0.5
         assert cfg.fee.market == "KOSDAQ"
-
-    def test_nested_impact_config(self):
-        cfg = BacktestConfig(
-            symbol="005930",
-            start_date="2026-03-13",
-            end_date="2026-03-13",
-            impact=ImpactConfig(type="sqrt", sigma=0.02, kappa=0.15),
-        )
-        assert cfg.impact.type == "sqrt"
-        assert cfg.impact.sigma == 0.02
-        assert cfg.impact.kappa == 0.15
 
     def test_nested_risk_config(self):
         cfg = BacktestConfig(
@@ -170,15 +155,6 @@ class TestValidation:
                 fee=FeeConfig(commission_bps=-1.0),
             )
 
-    def test_invalid_impact_type_raises(self):
-        with pytest.raises(ValueError, match="impact.type must be"):
-            BacktestConfig(
-                symbol="005930",
-                start_date="2026-03-13",
-                end_date="2026-03-13",
-                impact=ImpactConfig(type="unknown"),
-            )
-
     def test_invalid_slicing_algo_raises(self):
         with pytest.raises(ValueError, match="slicing.algo must be"):
             BacktestConfig(
@@ -246,7 +222,6 @@ class TestSerialization:
         )
         d = cfg.to_dict()
         assert d["fee"]["commission_bps"] == 2.0
-        assert d["impact"]["type"] == "linear"
 
     def test_from_dict_flat(self):
         d = {
@@ -276,13 +251,11 @@ class TestSerialization:
             start_date="2026-03-13",
             end_date="2026-03-13",
             fee=FeeConfig(commission_bps=1.2, market="KOSDAQ"),
-            impact=ImpactConfig(type="sqrt", sigma=0.03),
         )
         d = original.to_dict()
         restored = BacktestConfig.from_dict(d)
         assert restored.fee.commission_bps == 1.2
         assert restored.fee.market == "KOSDAQ"
-        assert restored.impact.sigma == 0.03
 
     def test_yaml_round_trip(self):
         original = BacktestConfig(

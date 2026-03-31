@@ -243,7 +243,6 @@ def test_execution_hint_consumed_with_real_fill():
         end_date="2026-03-12",
         seed=7,
         placement_style="passive",  # should be overridden by execution hint tags
-        impact_model="linear",
         latency_ms=1.0,
     )
     runner = PipelineRunner(config=config, data_dir=".", strategy=strategy)
@@ -268,7 +267,7 @@ def test_execution_hint_consumed_with_real_fill():
     fills = runner._fill_simulator.simulate_fills(parent, children, state0)
     assert fills
     assert fills[0].latency_ms > 0.0
-    assert fills[0].market_impact_bps > 0.0
+    assert fills[0].market_impact_bps == 0.0
 
 
 def test_stronger_runner_regression_with_position_attr_regime_state_policy():
@@ -281,7 +280,6 @@ def test_stronger_runner_regression_with_position_attr_regime_state_policy():
         end_date="2026-03-12",
         seed=11,
         placement_style="spread_adaptive",
-        impact_model="linear",
         latency_ms=1.0,
     )
     runner = PipelineRunner(config=config, data_dir=".", strategy=strategy)
@@ -293,7 +291,7 @@ def test_stronger_runner_regression_with_position_attr_regime_state_policy():
     assert result.n_fills >= 2  # entry + at least one exit fill
     assert summary["fill_rate"] > 0.0
     assert summary["avg_latency_ms"] > 0.0
-    assert summary["avg_market_impact_bps"] > 0.0
+    assert summary["avg_market_impact_bps"] == 0.0
 
     rt = strategy._states["TEST"]
     assert rt.state_vars["entry_count"] >= 1.0
@@ -429,7 +427,6 @@ def test_passive_join_old_vs_new_policy_comparison_on_same_signal():
         end_date="2026-03-12",
         seed=31,
         placement_style="passive",
-        impact_model="linear",
         latency_ms=100.0,
     )
 

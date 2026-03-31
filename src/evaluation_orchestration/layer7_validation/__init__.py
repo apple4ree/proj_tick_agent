@@ -1,7 +1,7 @@
 from .reproducibility import ReproducibilityManager, RunConfig
 from .backtest_config import (
     BacktestConfig, BacktestResult,
-    FeeConfig, ImpactConfig, LatencyConfig, ExchangeConfig,
+    FeeConfig, LatencyConfig, ExchangeConfig,
     SlicingConfig, PlacementConfig, RiskConfig,
 )
 from .component_factory import ComponentFactory
@@ -22,7 +22,7 @@ from .walk_forward import (
 __all__ = [
     "ReproducibilityManager", "RunConfig",
     "BacktestConfig", "BacktestResult",
-    "FeeConfig", "ImpactConfig", "LatencyConfig", "ExchangeConfig",
+    "FeeConfig", "LatencyConfig", "ExchangeConfig",
     "SlicingConfig", "PlacementConfig", "RiskConfig",
     "ComponentFactory",
     "PipelineRunner", "FillSimulator", "ReportBuilder",
