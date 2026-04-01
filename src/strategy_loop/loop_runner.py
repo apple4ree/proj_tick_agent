@@ -91,7 +91,9 @@ class LoopRunner:
             insights = self._memory.load_insights()
             messages = build_generation_messages(research_goal, insights, previous_feedback)
             try:
-                spec = self._client.chat_json(messages)
+                from strategy_loop.spec_schema import StrategySpec
+                spec_obj = self._client.chat_parsed(messages, StrategySpec)
+                spec = spec_obj.model_dump(mode="json", exclude_none=True)
             except Exception as exc:
                 logger.error("LLM generation failed: %s", exc)
                 rec = IterationRecord(

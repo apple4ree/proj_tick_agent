@@ -1,41 +1,30 @@
-# Goal Presets
+# conf/goals/ — Goal Preset 파일
 
-`run_generate_review_backtest_batch.sh`에서 바로 사용할 수 있는 universe goal 목록 preset 모음.
+`run_strategy_loop.py`의 `--research-goal` 인자에 사용할 수 있는 goal 목록 모음.
 
-## Preset Files
+## Preset 파일
 
-- `universe_goals_smoke.txt`: 빠른 smoke/sanity-check 용 2개 goal
-- `universe_goals_core.txt`: 일상 batch 탐색용 기본 goal 세트
-- `universe_goals_openai.txt`: OpenAI generation/review 계약 통과율을 높이기 위해 실행 제약 문구를 포함한 goal 세트
+| 파일 | 내용 |
+|------|------|
+| `universe_goals_smoke.txt` | 빠른 smoke 테스트용 2개 goal |
+| `universe_goals_core.txt` | 일상 탐색용 기본 goal 세트 |
+| `universe_goals_openai.txt` | OpenAI 생성 품질을 높이기 위해 실행 제약 문구를 포함한 goal 세트 |
 
-## Goals File Format
+## 파일 포맷
 
 - 한 줄당 goal 1개
-- 빈 줄은 무시
-- `#`로 시작하는 줄은 주석으로 무시
+- 빈 줄 무시
+- `#`으로 시작하는 줄은 주석
 
-## Examples
-
-Template/dev smoke:
+## 사용 예시
 
 ```bash
-./scripts/run_generate_review_backtest_batch.sh \
-  --goals-file conf/goals/universe_goals_smoke.txt \
-  --start-date 2026-03-13 \
-  --end-date 2026-03-13 \
-  --profile smoke \
-  --backend template \
-  --review-mode static
-```
-
-OpenAI/prod batch:
-
-```bash
-OPENAI_API_KEY=sk-... ./scripts/run_generate_review_backtest_batch.sh \
-  --goals-file conf/goals/universe_goals_openai.txt \
-  --start-date 2026-03-13 \
-  --end-date 2026-03-13 \
-  --profile prod \
-  --backend openai \
-  --review-mode auto-repair
+# goal 목록을 순차적으로 실행
+while IFS= read -r goal; do
+    [[ -z "$goal" || "$goal" == \#* ]] && continue
+    PYTHONPATH=src python scripts/run_strategy_loop.py \
+        --research-goal "$goal" \
+        --symbol 005930 --start-date 20260313 \
+        --mode mock --n-iter 3
+done < conf/goals/universe_goals_smoke.txt
 ```

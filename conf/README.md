@@ -5,40 +5,36 @@
 ## Config Stack (자동 병합 순서)
 
 1. `app.yaml` — 앱 이름, env, log_level, timezone
-2. `paths.yaml` — data_dir(H0STASP0), registry_dir, jobs_dir, outputs_dir
-3. `generation.yaml` — spec_format(v2), backend(template|openai), mode, n_ideas
+2. `paths.yaml` — data_dir(H0STASP0), outputs_dir
+3. `generation.yaml` — 전략 생성 관련 설정
 4. `backtest_base.yaml` — initial_cash, seed, fee_model, impact_model, slicing, placement
-5. `backtest_worker.yaml` — latencies_ms sweep, review_gate_required
+5. `backtest_worker.yaml` — latencies_ms sweep
 6. `workers.yaml` — poll_interval, once flag
 
 이후 `--profile`로 지정한 프로필 YAML이 병합되고, `--config`로 지정한 명시적 override가 최종 적용된다.
 
 ## 프로필
 
-| 프로필 | env | backend | mode | 특징 |
-|--------|-----|---------|------|------|
-| `dev` | dev | template | mock | auto_approve, DEBUG log |
-| `smoke` | dev | template | mock | latencies [0, 100], once: true |
-| `prod` | prod | openai | live | WARNING log, static_review_required |
+| 프로필 | env | 특징 |
+|--------|-----|------|
+| `dev` | dev | auto_approve, DEBUG log |
+| `smoke` | dev | latencies [0, 100], once: true |
+| `prod` | prod | WARNING log |
 
 ```bash
-PYTHONPATH=src python scripts/backtest.py --spec ... --profile dev
+PYTHONPATH=src python scripts/run_strategy_loop.py \
+    --research-goal "..." --symbol 005930 --start-date 20260313 \
+    --profile smoke --mode mock
 ```
 
-## advanced/ — 실험/레거시 설정
+## advanced/ — 참조용 파일
 
 Config stack에 포함되지 않는 참조용 파일들.
 
 | 파일 | 용도 |
 |------|------|
-| `backtest_core.yaml` | qlib-style 상세 설정 템플릿 (PipelineRunner 직접 로드) |
+| `backtest_core.yaml` | PipelineRunner 직접 로드용 상세 설정 템플릿 |
 | `baseline.yaml` | 실험 baseline 설정 (005930, KRX fee, linear impact) |
 | `baseline_mini.yaml` | 빠른 반복용 축소 baseline |
 | `env_config.yaml` | RL 환경 설정 (legacy, 미사용) |
 | `train_config.yaml` | RL 학습 설정 (legacy, 미사용) |
-| `EXPERIMENT_PROTOCOL.md` | 실험 수행 규칙 |
-
-## 주의사항
-
-- `paths.yaml`의 `data_dir`은 실제 H0STASP0 데이터 위치를 가리켜야 함
-- `${VAR}` 및 `${VAR:-default}` 환경변수 확장 지원

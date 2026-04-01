@@ -9,7 +9,12 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any
+from typing import Any, Type, TYPE_CHECKING
+
+from pydantic import BaseModel
+
+if TYPE_CHECKING:
+    pass
 
 _MOCK_SPEC = {
     "name": "mock_order_imbalance_strategy",
@@ -76,3 +81,24 @@ class OpenAIClient:
         """Send messages and parse the response as JSON."""
         raw = self.chat(messages, response_format="json_object")
         return json.loads(raw)
+
+    def chat_parsed(self, messages: list[dict], response_model: Type[BaseModel]) -> BaseModel:
+        """Structured output: parse response directly into a Pydantic model.
+
+        mock 모드에서는 _MOCK_SPEC을 모델로 변환해 반환한다.
+        live 모드에서는 beta.chat.completions.parse를 사용한다.
+        """
+        if self.mode == "mock":
+            system = next((m["content"] for m in messages if m.get("role") == "system"), "")
+            if "verdict" in system and "issues" in system:
+                # feedback 요청은 chat_parsed로 호출하지 않지만 혹시를 대비
+                raise ValueError("chat_parsed should not be called for feedback requests")
+            return response_model.model_validate(_MOCK_SPEC)
+
+        resp = self._client.beta.chat.completions.parse(
+            model=self.model,
+            messages=messages,
+            response_format=response_model,
+            temperature=0.7,
+        )
+        return resp.choices[0].message.parsed

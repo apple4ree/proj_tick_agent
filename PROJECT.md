@@ -1,62 +1,80 @@
-# Project Map (v2-only)
+# Project Map
 
 ## Root Layout
 
-- `src/`: 실행 로직
-- `scripts/`: 운영/검증 CLI
-- `conf/`: YAML 설정 및 프로필
-- `strategies/`: runtime registry
-- `strategies/examples/`: reference v2 examples
-- `tests/`: pytest suites
-- `docs/`: 문서 (COMMANDS, history)
+| 경로 | 역할 |
+|------|------|
+| `scripts/` | CLI 진입점 |
+| `src/` | 소스 코드 |
+| `conf/` | YAML 설정 |
+| `tests/` | pytest suite |
+| `outputs/` | 런타임 산출물 (git 미추적) |
 
-## `src/` Subtrees
+## `src/` 서브트리
 
-- `src/data/`
-  - layer0 데이터 적재/정제/동기화/상태 생성
-- `src/strategy_block/`
-  - `strategy_generation/` v2 전략 생성 (template_v2 + openai_v2 dual backend)
-  - `strategy_review/` v2 정적 검토
-  - `strategy_specs/` v2 spec/AST
-  - `strategy_registry/` spec+metadata 저장소
-  - `strategy_compiler/` v2 spec 컴파일
-- `src/execution_planning/`
-  - signal -> target -> order -> execution planning
-- `src/market_simulation/`
-  - fill/impact/fee/latency
-- `src/evaluation_orchestration/`
-  - backtest pipeline + metrics + job worker
+```
+src/
+├── strategy_loop/               # LLM 전략 탐색 루프 (핵심)
+│   ├── spec_simple.py           # JSON 스펙 포맷 + recursive evaluate()
+│   ├── hard_gate.py             # 백테스트 전 스펙 검증
+│   ├── simple_spec_strategy.py  # Strategy ABC 구현
+│   ├── openai_client.py         # OpenAI 래퍼 (live/mock)
+│   ├── prompt_builder.py        # LLM 메시지 구성
+│   ├── feedback_generator.py    # 백테스트 결과 → LLM 피드백
+│   ├── memory_store.py          # 전략 기록 저장
+│   └── loop_runner.py           # 메인 루프
+│
+├── data/
+│   └── layer0_data/             # 틱 데이터 적재/정제/피처/MarketState
+│
+├── execution_planning/
+│   ├── layer1_signal/           # Signal 데이터 계약
+│   ├── layer2_position/         # Signal → TargetPosition
+│   ├── layer3_order/            # TargetPosition → ParentOrder
+│   └── layer4_execution/        # ParentOrder → ChildOrder
+│
+├── market_simulation/
+│   └── layer5_simulator/        # ChildOrder → FillEvent (LOB 매칭)
+│
+├── evaluation_orchestration/
+│   ├── layer6_evaluator/        # PnL/Risk/Execution/Turnover 메트릭
+│   └── layer7_validation/       # PipelineRunner + ReportBuilder
+│
+├── strategy_block/
+│   ├── strategy/base.py         # Strategy ABC
+│   └── strategy_compiler/v2/features.py  # BUILTIN_FEATURES 목록
+│
+├── monitoring/                  # 이벤트 버스 + 검증 레이어
+└── utils/                       # config, logger, metrics
+```
 
-## Scripts
+## `scripts/`
 
-- generation: `scripts/generate_strategy.py`
-- review: `scripts/review_strategy.py`
-- backtest: `scripts/backtest.py`, `scripts/backtest_strategy_universe.py`
-- e2e launcher: `scripts/run_generate_review_backtest.sh`
-- internal: `scripts/internal/workers/`, `scripts/internal/ops/`, `scripts/internal/adhoc/`
+| 파일 | 역할 |
+|------|------|
+| `run_strategy_loop.py` | LLM 반복 전략 탐색 루프 (주 진입점) |
+| `backtest.py` | 단일 종목 백테스트 |
 
-## Current Operational Status
+## `conf/`
 
-- v2-only 경로: generation/review/registry/compiler/backtest
-- single-symbol backtest: operational
-- 기본 시각화 산출물: 5개 plot (intraday cumulative profit 포함)
-- worker path: available
+| 파일 | 역할 |
+|------|------|
+| `app.yaml` | 앱 이름, env, log_level |
+| `paths.yaml` | data_dir, outputs_dir |
+| `backtest_base.yaml` | 백테스트 기본 파라미터 |
+| `backtest_worker.yaml` | latency sweep 설정 |
+| `generation.yaml` | 전략 생성 설정 |
+| `profiles/` | dev / smoke / prod 프로필 오버라이드 |
 
-## Maturity Snapshot
+## `outputs/` 구조 (런타임 자동 생성)
 
-Implemented:
-- v2 spec lifecycle (generate/review/save/load/compile/backtest)
-- dual generation backend: template_v2 (keyword→template→lower) + openai_v2 (goal→structured plan→lower→review)
-- registry metadata gate + worker orchestration
-
-Partial:
-- execution policy 일부는 hint-level/partial override
-- reviewer는 static/heuristic 점검
-
-Note:
-- outputs/logs/jobs/experiments/checkpoints는 런타임 산출물 (git 미추적, 코드가 필요 시 자동 생성)
-
-## Examples Directory Role
-
-`strategies/examples/`는 참조용 샘플 모음이다.
-실행/저장/승인 기준은 registry(`strategies/`) 기준으로 관리한다.
+```
+outputs/
+├── memory/
+│   ├── strategies/{run_id}.json   # 스펙 + 백테스트 요약 + 피드백
+│   └── global_memory.json         # 전략 간 교차 인사이트
+└── backtests/{run_id}/
+    ├── summary.json
+    ├── fills.csv, signals.csv, orders.csv, pnl_series.csv, market_quotes.csv
+    └── plots/
+```

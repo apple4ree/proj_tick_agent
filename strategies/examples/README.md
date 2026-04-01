@@ -1,23 +1,14 @@
-# Strategy Examples (v2)
+# strategies/examples/
 
-`strategies/examples/`는 StrategySpec v2 참고용 샘플 모음이다. 이 디렉토리는 runtime registry가 아니다.
+참고용 정적 전략 샘플.
 
-## Role
+이 디렉토리의 파일들은 구 `StrategySpecV2` AST 포맷이다.
+`run_strategy_loop.py`가 생성하는 Simple JSON Spec과 다른 포맷이므로 루프에 직접 주입하지 않는다.
 
-- reference-only 샘플 제공
-- generation/review/backtest 명령 예제의 입력 spec 제공
-- 운영 승인/버전 추적은 `strategies/` registry 경로에서 수행
+`backtest.py`로 직접 실행 가능:
 
-## Current Canonical Examples
-
-- `stateful_cooldown_momentum_v2.0.json`
-- `position_aware_time_exit_momentum_v2.0.json`
-- `regime_filtered_persist_momentum_v2.0.json`
-
-## Typical Flow
-
-1. examples에서 시작해 spec 구조를 확인
-2. `scripts/generate_strategy.py`로 신규 v2 spec 생성
-3. `scripts/review_strategy.py`로 정적 검토
-4. `scripts/backtest.py` 또는 worker 경로로 실행
-5. 승인/보관이 필요하면 registry(`strategies/`)에 반영
+```bash
+PYTHONPATH=src python scripts/backtest.py \
+    --spec strategies/examples/stateful_cooldown_momentum_v2.0.json \
+    --symbol 005930 --start-date 20260313
+```

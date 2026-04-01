@@ -1,47 +1,36 @@
 # tests/
 
-`tests/`는 현재 canonical pytest suite다. 전체 삭제 대상이 아니며, validation tier와 freeze/docs contract를 포함한 active quality gate를 유지한다. 보관 목적의 테스트 디렉토리는 두지 않는다.
-
-## Validation Tiers
+현재 canonical pytest suite. 208개 테스트.
 
 ```bash
-# Smoke: 빠른 wiring 확인
-./scripts/internal/ops/run_validation_tiers.sh smoke
-
-# Stronger: 현재 quality gate용 통합/회귀
-./scripts/internal/ops/run_validation_tiers.sh stronger
-
-# 전체 tier
-./scripts/internal/ops/run_validation_tiers.sh all
+cd /home/dgu/tick/proj_rl_agent
+PYTHONPATH=src pytest tests/ -q
 ```
 
-### Smoke
+## 커버리지 영역
 
-- `test_generation_direct_mode.py`
-- `test_v2_execution_hint_integration.py`
-- `test_backtest_script.py`
+| 파일 | 커버 대상 |
+|------|----------|
+| `test_pipeline_runner.py` | PipelineRunner 백테스트 실행 |
+| `test_backtest_config.py` | BacktestConfig 파라미터 검증 |
+| `test_backtest_constraint_context.py` | 백테스트 제약 컨텍스트 |
+| `test_component_factory.py` | ComponentFactory 조립 |
+| `test_config.py` | 설정 로드/병합/프로필 |
+| `test_goal_presets.py` | goal preset 파일 형식 |
+| `test_latency_semantics.py` | latency 시간 의미론 |
+| `test_layer3_orders.py` | Layer 3 주문 생성 |
+| `test_layer4_execution.py` | Layer 4 실행 전술 |
+| `test_layer5_fee_impact.py` | 수수료/impact 계산 |
+| `test_matching_engine.py` | LOB 매칭 엔진 |
+| `test_monitoring_integration.py` | 이벤트 버스 + verifier |
+| `test_pnl_ledger_fixes.py` | PnL 원장 계산 |
+| `test_queue_position.py` | 대기열 위치 모델 |
+| `test_selection_metrics.py` | SelectionScore 계산 |
+| `test_short_position_pnl.py` | 숏 포지션 P&L |
+| `test_state_builder.py` | MarketStateBuilder |
+| `test_v2_execution_hint_integration.py` | 실행 hint 통합 |
 
-### Stronger
-
-- `test_v2_stronger_integration.py`
-- `test_pipeline_runner.py`
-- `test_v2_phase3.py`
-- `test_registry_v2_integration.py`
-- `test_backtest_worker.py`
-
-Smoke/Stronger 바깥의 나머지 테스트도 canonical suite의 일부다. tier 스크립트에 없더라도 현재 문서 계약, freeze, reviewer/runtime semantics, selection/promotion regression을 고정한다.
-
-## Canonical Coverage Axes
-
-- Generation / review: direct generation, OpenAI/mock lowering, prompt/schema strictness, review pipeline, repair patching, reviewer hard gates
-- Backtest realism: delayed observation, latency, queue semantics, feedback, execution-policy/backtest-context interaction, CLI/runtime orchestration
-- Freeze / docs contract: public CLI surface, docs hierarchy, benchmark freeze artifact contract, end-to-end smoke freeze
-- Walk-forward / family-aware selection: trial registry/accounting, family index, selection metrics, walk-forward harness and selector
-- Promotion / export: deployment contract, promotion gate, bundle export
-
-Focused lower-level guards도 유지한다. 예를 들면 `test_v2_phase2.py`, `test_v2_position_attr.py`, `test_position_attr_validation.py`, `test_visualize_intraday_plot.py`는 active runtime/schema behavior를 직접 고정한다.
-
-## Notes
+## 주의
 
 - `conftest.py`가 `src/`를 `sys.path`에 추가한다.
 - 대부분 테스트는 mock/template backend로 실데이터 없이 동작한다.

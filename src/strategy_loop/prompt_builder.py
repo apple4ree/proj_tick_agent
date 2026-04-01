@@ -18,41 +18,14 @@ _FEATURES_LIST = ", ".join(sorted(BUILTIN_FEATURES))
 
 _GEN_SYSTEM = """\
 You are a quantitative strategy designer for KRX tick-data backtesting.
-Generate a strategy spec as a JSON object with EXACTLY this schema:
-{
-  "name": "<string>",
-  "entry": {
-    "side": "long" | "short",
-    "condition": <BoolExpr>,
-    "size": <positive int>
-  },
-  "exit": {
-    "condition": <BoolExpr>
-  },
-  "risk": {
-    "max_position": <positive int>
-  }
-}
-
-BoolExpr types:
-  {"type": "comparison", "feature": "<feature_name>", "op": ">|>=|<|<=|==|!=", "threshold": <number>}
-  {"type": "comparison", "left": <ValueExpr>, "op": "...", "right": <ValueExpr>}
-  {"type": "all", "conditions": [<BoolExpr>, ...]}
-  {"type": "any", "conditions": [<BoolExpr>, ...]}
-  {"type": "not", "condition": <BoolExpr>}
-
-ValueExpr types:
-  {"type": "feature", "name": "<feature_name>"}
-  {"type": "const", "value": <number>}
-  {"type": "position_attr", "name": "holding_ticks"}
 
 Available features: """ + _FEATURES_LIST + """
 
 Rules:
-- Return ONLY valid JSON, no markdown, no explanation.
-- entry.condition must use market features only (not position_attr).
-- exit.condition may use holding_ticks via position_attr.
+- entry.condition: use shorthand form (feature + op + threshold) for market feature comparisons.
+- exit.condition: use full form (left + op + right) when comparing holding_ticks via position_attr.
 - entry.size must be <= risk.max_position.
+- Prefer strategies robust to KRX fees and 0-500ms latency.
 """
 
 _FEEDBACK_SYSTEM = """\
