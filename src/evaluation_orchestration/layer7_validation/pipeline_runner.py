@@ -472,7 +472,8 @@ class PipelineRunner:
                 if mid is not None:
                     nav = self._bookkeeper.state.nav({symbol: mid})
                     portfolio_values.append((true_state.timestamp, nav))
-                    positions_history.append(dict(self._bookkeeper.state.positions))
+                    if t % 60 == 0:
+                        positions_history.append(dict(self._bookkeeper.state.positions))
                     # O(1) running TWAP update
                     _twap_sum[symbol] = _twap_sum.get(symbol, 0.0) + mid
                     _twap_count[symbol] = _twap_count.get(symbol, 0) + 1
@@ -509,7 +510,8 @@ class PipelineRunner:
 
             nav = self._bookkeeper.state.nav({symbol: mid})
             portfolio_values.append((true_state.timestamp, nav))
-            positions_history.append(dict(self._bookkeeper.state.positions))
+            if t % 60 == 0:
+                positions_history.append(dict(self._bookkeeper.state.positions))
             # O(1) running TWAP update
             _twap_sum[symbol] = _twap_sum.get(symbol, 0.0) + mid
             _twap_count[symbol] = _twap_count.get(symbol, 0) + 1

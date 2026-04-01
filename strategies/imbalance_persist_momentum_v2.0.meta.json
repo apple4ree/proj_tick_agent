@@ -3,8 +3,8 @@
   "name": "imbalance_persist_momentum",
   "version": "2.0",
   "status": "reviewed",
-  "created_at": "2026-03-30T22:10:00.982641+00:00",
-  "generation_backend": "openai",
+  "created_at": "2026-03-31T19:02:43.226655+00:00",
+  "generation_backend": "template",
   "generation_mode": "live",
   "static_review_passed": true,
   "approved_for_backtest": false,
@@ -14,20 +14,13 @@
   "trace_path": "/home/dgu/tick/proj_rl_agent/outputs/strategy_traces/imbalance_persist_momentum_v2.0_trace.json",
   "extra": {
     "generation": {
-      "generation_outcome": "fallback_success",
+      "generation_outcome": "success",
       "static_review_passed": true,
-      "fallback_used": true,
-      "fallback_count": 1,
-      "fallback_events": [
-        {
-          "stage": "generator",
-          "type": "openai_to_template_fallback",
-          "reason": "OpenAI returned no response (mode=live, status=live_failed)",
-          "severity": "medium"
-        }
-      ],
+      "fallback_used": false,
+      "fallback_count": 0,
+      "fallback_events": [],
       "generation_class": "template_v2",
-      "requested_backend": "openai",
+      "requested_backend": "template",
       "effective_backend": "template_v2",
       "requested_mode": "live",
       "effective_mode": "live",

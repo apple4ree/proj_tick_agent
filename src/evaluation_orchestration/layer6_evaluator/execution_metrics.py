@@ -407,6 +407,7 @@ class ExecutionMetrics:
 
         ts_sorted = sorted(state_map.keys())
         prices_sorted = [state_map[t] for t in ts_sorted]
+        ts_arr = np.array(ts_sorted, dtype="datetime64[ns]")
 
         # Compute rolling average at time of each fill
         good_fills = 0
@@ -414,7 +415,7 @@ class ExecutionMetrics:
 
         for f in fills:
             # Find the mid at or before fill time
-            idx = np.searchsorted(ts_sorted, f.timestamp, side="right") - 1
+            idx = np.searchsorted(ts_arr, np.datetime64(f.timestamp, "ns"), side="right") - 1
             if idx < 0:
                 continue
 
@@ -446,10 +447,11 @@ class ExecutionMetrics:
 
         state_map: dict[pd.Timestamp, "MarketState"] = {s.timestamp: s for s in states}
         ts_sorted = sorted(state_map.keys())
+        ts_arr = np.array(ts_sorted, dtype="datetime64[ns]")
 
         participation_rates: list[float] = []
         for f in fills:
-            idx = np.searchsorted(ts_sorted, f.timestamp, side="right") - 1
+            idx = np.searchsorted(ts_arr, np.datetime64(f.timestamp, "ns"), side="right") - 1
             if idx < 0:
                 continue
             ts_key = ts_sorted[idx]

@@ -251,26 +251,30 @@ class TurnoverMetrics:
             all_symbols.update(snapshot.keys())
 
         holding_periods: dict[str, float] = {}
+        n = len(positions_history)
 
         for symbol in all_symbols:
-            # Build qty time series
-            qty_series = [snap.get(symbol, 0) for snap in positions_history]
-
-            open_step: int | None = None
-            durations: list[int] = []
-
-            for step, qty in enumerate(qty_series):
-                if qty != 0 and open_step is None:
-                    open_step = step
-                elif qty == 0 and open_step is not None:
-                    durations.append(step - open_step)
-                    open_step = None
-
-            # Still open at end
-            if open_step is not None:
-                durations.append(len(qty_series) - open_step)
-
-            holding_periods[symbol] = float(np.mean(durations)) if durations else 0.0
+            qty_arr = np.fromiter(
+                (snap.get(symbol, 0) for snap in positions_history),
+                dtype=np.int64, count=n,
+            )
+            nonzero = qty_arr != 0
+            # Find transition indices: flat→open and open→flat
+            padded = np.empty(n + 2, dtype=bool)
+            padded[0] = False
+            padded[1:-1] = nonzero
+            padded[-1] = False
+            opens = np.where(~padded[:-1] & padded[1:])[0]   # step indices where position opened
+            closes = np.where(padded[:-1] & ~padded[1:])[0]  # step indices after position closed
+            if len(opens) > 0 and len(closes) >= len(opens):
+                durations = closes[:len(opens)] - opens
+                holding_periods[symbol] = float(np.mean(durations))
+            elif len(opens) > 0:
+                # Still open at end
+                durations = np.append(closes, n) - opens[:len(closes) + 1]
+                holding_periods[symbol] = float(np.mean(durations))
+            else:
+                holding_periods[symbol] = 0.0
 
         return holding_periods
 
@@ -351,12 +355,12 @@ class TurnoverMetrics:
                     regime = "balanced"
             state_map[ts] = str(regime)
 
-        ts_arr = sorted(state_map.keys())
+        ts_arr = np.array(sorted(state_map.keys()), dtype="datetime64[ns]")
 
         # Assign each fill to a regime
         regime_fills: dict[str, list["FillEvent"]] = {}
         for f in fills:
-            idx = np.searchsorted(ts_arr, f.timestamp, side="right") - 1
+            idx = np.searchsorted(ts_arr, np.datetime64(f.timestamp, "ns"), side="right") - 1
             if idx < 0:
                 regime_label = "unknown"
             else:

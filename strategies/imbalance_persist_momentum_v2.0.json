@@ -139,10 +139,10 @@
   "metadata": {
     "pipeline": "v2_template_lowering",
     "template_name": "imbalance_persist_momentum",
-    "research_goal": "microprice dislocation strategy with robust stop-loss and time exit",
+    "research_goal": "order imbalance alpha",
     "idea_name": "imbalance_persist_momentum",
     "latency_ms": 1.0,
     "spec_canonical": "v2",
-    "generated_at": "2026-03-30T22:10:00.979059+00:00"
+    "generated_at": "2026-03-31T19:02:43.222212+00:00"
   }
 }

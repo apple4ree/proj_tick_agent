@@ -1,0 +1,159 @@
+{
+  "name": "order_imbalance_alpha_strategy",
+  "version": "2.0",
+  "description": "A strategy designed to exploit order imbalance signals for alpha generation in the Korean equity market. It uses both long and short entries based on order imbalance thresholds and includes robust exit policies with stop-loss and time-based exits.",
+  "spec_format": "v2",
+  "preconditions": [
+    {
+      "name": "spread_filter",
+      "condition": {
+        "type": "comparison",
+        "op": "<",
+        "threshold": 20.0,
+        "feature": "spread_bps"
+      }
+    }
+  ],
+  "entry_policies": [
+    {
+      "name": "long_entry_on_order_imbalance",
+      "side": "long",
+      "trigger": {
+        "type": "comparison",
+        "op": ">",
+        "threshold": 0.3,
+        "feature": "order_imbalance"
+      },
+      "strength": {
+        "type": "const",
+        "value": 0.5
+      },
+      "constraints": {
+        "cooldown_ticks": 50,
+        "no_reentry_until_flat": true
+      }
+    },
+    {
+      "name": "short_entry_on_order_imbalance",
+      "side": "short",
+      "trigger": {
+        "type": "comparison",
+        "op": "<",
+        "threshold": -0.3,
+        "feature": "order_imbalance"
+      },
+      "strength": {
+        "type": "const",
+        "value": 0.5
+      },
+      "constraints": {
+        "cooldown_ticks": 50,
+        "no_reentry_until_flat": true
+      }
+    }
+  ],
+  "exit_policies": [
+    {
+      "name": "exit_policy",
+      "rules": [
+        {
+          "name": "stop_loss",
+          "priority": 1,
+          "condition": {
+            "type": "comparison",
+            "op": ">=",
+            "threshold": 0.0,
+            "left": {
+              "type": "position_attr",
+              "name": "unrealized_pnl_bps"
+            }
+          },
+          "action": {
+            "type": "close_all"
+          }
+        },
+        {
+          "name": "time_exit",
+          "priority": 2,
+          "condition": {
+            "type": "comparison",
+            "op": ">=",
+            "threshold": 10.0,
+            "left": {
+              "type": "position_attr",
+              "name": "holding_ticks"
+            }
+          },
+          "action": {
+            "type": "close_all"
+          }
+        }
+      ]
+    }
+  ],
+  "risk_policy": {
+    "max_position": 500,
+    "inventory_cap": 1000,
+    "position_sizing": {
+      "mode": "fixed",
+      "base_size": 100,
+      "max_size": 500
+    }
+  },
+  "regimes": [
+    {
+      "name": "normal_market_conditions",
+      "priority": 1,
+      "when": {
+        "type": "comparison",
+        "op": "<=",
+        "threshold": 30.0,
+        "feature": "spread_bps"
+      },
+      "entry_policy_refs": [
+        "long_entry_on_order_imbalance",
+        "short_entry_on_order_imbalance"
+      ],
+      "exit_policy_ref": "exit_policy"
+    }
+  ],
+  "metadata": {
+    "pipeline": "v2_openai_plan_lowering",
+    "plan_name": "order_imbalance_alpha_strategy",
+    "plan_style": "auto",
+    "execution_policy_missing": false,
+    "execution_policy_explicit": true,
+    "inferred_holding_horizon_ticks": null,
+    "inferred_short_horizon": false,
+    "execution_policy_missing_short_horizon": false,
+    "invalid_zero_horizon": false,
+    "aggressive_passive_short_horizon": false,
+    "research_goal": "order imbalance alpha",
+    "strategy_style": "auto",
+    "latency_ms": 1.0,
+    "spec_canonical": "v2",
+    "generation_source": "openai_v2_plan",
+    "plan_schema_version": "1.0",
+    "generated_at": "2026-04-01T01:43:07.082140+00:00",
+    "generation_rescue": {
+      "attempted": true,
+      "eligible": true,
+      "applied": true,
+      "operations": [
+        "raise_non_positive_holding_horizon_to_min_10"
+      ],
+      "reasons": [
+        "leakage_feature_time_risk:FEATURE_TIME_NEAR_ZERO_HORIZON",
+        "execution_policy_too_aggressive:NO_CODE"
+      ],
+      "holding_horizon_before": 0,
+      "holding_horizon_after": 10,
+      "short_horizon": true
+    }
+  },
+  "execution_policy": {
+    "placement_mode": "passive_join",
+    "cancel_after_ticks": 15,
+    "max_reprices": 2
+  }
+}

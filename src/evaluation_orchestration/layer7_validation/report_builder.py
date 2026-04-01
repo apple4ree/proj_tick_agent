@@ -227,19 +227,21 @@ class ReportBuilder:
     @staticmethod
     def _save_market_quotes(states: list, run_dir: Path) -> None:
         """Save market quote snapshots for visualization."""
-        rows = []
-        for s in states:
-            lob = s.lob
-            rows.append({
-                "timestamp": s.timestamp,
-                "symbol": s.symbol,
-                "best_bid": lob.best_bid,
-                "best_ask": lob.best_ask,
-                "mid_price": lob.mid_price,
-            })
-        if rows:
-            pd.DataFrame(rows).to_csv(run_dir / "market_quotes.csv", index=False)
-            logger.info("Saved %d market quote snapshots", len(rows))
+        if not states:
+            return
+        timestamps = [s.timestamp for s in states]
+        symbols = [s.symbol for s in states]
+        best_bids = [s.lob.best_bid for s in states]
+        best_asks = [s.lob.best_ask for s in states]
+        mid_prices = [s.lob.mid_price for s in states]
+        pd.DataFrame({
+            "timestamp": timestamps,
+            "symbol": symbols,
+            "best_bid": best_bids,
+            "best_ask": best_asks,
+            "mid_price": mid_prices,
+        }).to_csv(run_dir / "market_quotes.csv", index=False)
+        logger.info("Saved %d market quote snapshots", len(states))
 
     @staticmethod
     def _generate_plots(run_dir: Path) -> None:
@@ -248,6 +250,9 @@ class ReportBuilder:
             import importlib.util
 
             _viz_path = Path(__file__).resolve().parents[3] / "scripts" / "internal" / "adhoc" / "visualize.py"
+            if not _viz_path.exists():
+                logger.debug("Plot generation skipped: visualize.py not found at %s", _viz_path)
+                return
             _spec = importlib.util.spec_from_file_location("visualize_script", _viz_path)
             _mod = importlib.util.module_from_spec(_spec)  # type: ignore[arg-type]
             _spec.loader.exec_module(_mod)  # type: ignore[union-attr]

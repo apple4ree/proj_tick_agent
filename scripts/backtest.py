@@ -31,7 +31,6 @@ import logging
 import sys
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -46,10 +45,11 @@ from evaluation_orchestration.layer7_validation import (
     BacktestResult,
     PipelineRunner,
 )
+from monitoring import attach_to_pipeline
+from monitoring.verifiers.batch_verifier import run_all_verifiers
+from monitoring.reporters.exporter import export_monitoring_run
 from strategy_block.strategy.base import Strategy
-from strategy_block.strategy_compiler import compile_strategy
-from strategy_block.strategy_specs.v2.schema_v2 import StrategySpecV2
-from utils.config import load_config, get_paths, get_backtest, get_backtest_worker
+from utils.config import load_config, get_paths, get_backtest
 
 logger = logging.getLogger(__name__)
 
@@ -145,15 +145,17 @@ def build_config(args: argparse.Namespace, bt_cfg: dict | None = None) -> Backte
     )
 
 
-def _load_spec(path: str) -> StrategySpecV2:
-    """Load a StrategySpecV2 from a JSON file."""
-    return StrategySpecV2.load(path)
+def _load_spec(path: str) -> dict:
+    """Load a simple strategy spec dict from a JSON file."""
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
 
 
 def _build_strategy(args: argparse.Namespace) -> Strategy:
-    """Compile a strategy from a v2 strategy spec JSON."""
+    """Build a strategy from a simple spec JSON file."""
+    from strategy_loop.simple_spec_strategy import SimpleSpecStrategy
     spec = _load_spec(args.spec)
-    return compile_strategy(spec)
+    return SimpleSpecStrategy(spec)
 
 
 def run_backtest(args: argparse.Namespace, cfg: dict | None = None) -> BacktestResult:
@@ -186,7 +188,15 @@ def run_backtest(args: argparse.Namespace, cfg: dict | None = None) -> BacktestR
         output_dir=output_dir,
         strategy=strategy,
     )
-    return runner.run(states)
+    runner = attach_to_pipeline(runner)
+    result = runner.run(states)
+
+    monitoring_dir = Path(output_dir) / "monitoring"
+    monitoring_dir.mkdir(parents=True, exist_ok=True)
+    report = run_all_verifiers(runner.bus)
+    export_monitoring_run(runner.bus, report, monitoring_dir, result.run_id)
+
+    return result
 
 
 def backtest_config_from_cfg(
@@ -333,12 +343,29 @@ def main() -> None:
         output_dir=output_dir,
         strategy=strategy,
     )
+    runner = attach_to_pipeline(runner)
     result = runner.run(states)
     summary = result.summary()
+
+    monitoring_dir = Path(output_dir) / "monitoring"
+    monitoring_dir.mkdir(parents=True, exist_ok=True)
+    report = run_all_verifiers(runner.bus)
+    export_monitoring_run(runner.bus, report, monitoring_dir, result.run_id)
 
     print(json.dumps(summary, indent=2, sort_keys=True, default=float))
     run_dir = Path(output_dir) / result.run_id
     print(f"Saved run artifacts: {run_dir}")
+
+    bus_summary = runner.bus.summary()
+    print("\n─── Event Bus Summary ─────────────────────────")
+    for event_type, count in sorted(bus_summary.items()):
+        print(f"  {event_type:<30} {count:>6}")
+    print(f"\n─── Verification Results ──────────────────────")
+    print(f"  fee      pass rate: {report.fee_pass_rate*100:.1f}%  ({len(report.fee_failures)} failures)")
+    print(f"  slippage pass rate: {report.slippage_pass_rate*100:.1f}%  ({len(report.slippage_failures)} failures)")
+    print(f"  latency  pass rate: {report.latency_pass_rate*100:.1f}%  ({len(report.latency_failures)} failures)")
+    print(f"\n─── Monitoring Exports ─────────────────────────")
+    print(f"  {monitoring_dir / result.run_id}")
 
 
 if __name__ == "__main__":
