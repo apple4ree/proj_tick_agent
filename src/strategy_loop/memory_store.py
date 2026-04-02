@@ -61,17 +61,41 @@ class MemoryStore:
 
     def load_insights(self) -> list[str]:
         """Return the current list of cross-strategy insights."""
-        if not self._global_path.exists():
-            return []
-        data = json.loads(self._global_path.read_text(encoding="utf-8"))
-        return data.get("insights", [])
+        return self._load_global().get("insights", [])
 
     def append_insights(self, new_insights: list[str]) -> None:
         """Append new insights to global memory (deduped)."""
-        existing = self.load_insights()
+        data = self._load_global()
+        existing = data.get("insights", [])
         combined = existing + [s for s in new_insights if s not in existing]
+        data["insights"] = combined
+        self._save_global(data)
+        logger.debug("MemoryStore: global insights updated (%d total)", len(combined))
+
+    # ── failure patterns ──────────────────────────────────────────────
+
+    def load_failure_patterns(self) -> list[str]:
+        """Return the accumulated list of failure patterns (from feedback issues)."""
+        return self._load_global().get("failure_patterns", [])
+
+    def append_failure_patterns(self, new_patterns: list[str]) -> None:
+        """Append failure patterns to global memory (deduped)."""
+        data = self._load_global()
+        existing = data.get("failure_patterns", [])
+        combined = existing + [s for s in new_patterns if s not in existing]
+        data["failure_patterns"] = combined
+        self._save_global(data)
+        logger.debug("MemoryStore: failure patterns updated (%d total)", len(combined))
+
+    # ── internal ──────────────────────────────────────────────────────
+
+    def _load_global(self) -> dict:
+        if not self._global_path.exists():
+            return {}
+        return json.loads(self._global_path.read_text(encoding="utf-8"))
+
+    def _save_global(self, data: dict) -> None:
         self._global_path.write_text(
-            json.dumps({"insights": combined}, ensure_ascii=False, indent=2),
+            json.dumps(data, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        logger.debug("MemoryStore: global insights updated (%d total)", len(combined))

@@ -1,0 +1,7 @@
+Research goal: $research_goal
+$section_session_history
+$section_best_spec
+$section_memory_insights
+$section_failure_patterns
+$section_previous_feedback
+Generate the strategy spec JSON.

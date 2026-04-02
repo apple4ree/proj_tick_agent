@@ -83,13 +83,26 @@ class LoopRunner:
         result = LoopResult()
         previous_feedback: dict[str, Any] | None = None
 
+        # Session-level tracking: what has been tried in this run
+        session_attempts: list[dict[str, Any]] = []
+        best_so_far: dict[str, Any] | None = None      # spec with highest fill_rate
+        best_fill_rate: float = -1.0
+
         for i in range(n_iterations):
             run_id = str(uuid.uuid4())[:8]
             logger.info("─── Iteration %d / %d  (run_id=%s) ───", i + 1, n_iterations, run_id)
 
             # 1. Generate spec via LLM
             insights = self._memory.load_insights()
-            messages = build_generation_messages(research_goal, insights, previous_feedback)
+            failure_patterns = self._memory.load_failure_patterns()
+            messages = build_generation_messages(
+                research_goal=research_goal,
+                memory_insights=insights,
+                failure_patterns=failure_patterns,
+                previous_feedback=previous_feedback,
+                session_attempts=session_attempts,
+                best_so_far=best_so_far,
+            )
             try:
                 from strategy_loop.spec_schema import StrategySpec
                 spec_obj = self._client.chat_parsed(messages, StrategySpec)
@@ -142,11 +155,27 @@ class LoopRunner:
             self._memory.save_strategy(run_id, spec, bt_summary, feedback)
             if feedback.get("suggestions"):
                 self._memory.append_insights(feedback["suggestions"])
+            if feedback.get("issues"):
+                self._memory.append_failure_patterns(feedback["issues"])
+
+            # 6. Update session tracking
+            fill_rate = bt_summary.get("fill_rate") or 0.0
+            session_attempts.append({
+                "iteration": i + 1,
+                "spec_name": spec.get("name", ""),
+                "fill_rate": fill_rate,
+                "net_pnl": bt_summary.get("net_pnl") or 0.0,
+                "n_fills": bt_summary.get("n_fills") or 0.0,
+                "verdict": feedback["verdict"],
+            })
+            if fill_rate > best_fill_rate:
+                best_fill_rate = fill_rate
+                best_so_far = spec
 
             previous_feedback = feedback
             result.iterations.append(rec)
 
-            # 6. Check stop condition
+            # 7. Check stop condition
             if feedback["verdict"] == "pass":
                 result.best_run_id = run_id
                 result.verdict = "pass"
