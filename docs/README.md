@@ -7,6 +7,7 @@
 | 문서 | 경로 |
 |------|------|
 | 프로젝트 소개 + Quick Start | `../README.md` |
+| Notion용 Mermaid 다이어그램 세트 | `./notion_diagram_set.md` |
 | 시스템 아키텍처 | `../ARCHITECTURE.md` |
 | 파이프라인 상세 | `../PIPELINE.md` |
 | 프로젝트 맵 (디렉토리/파일 구조) | `../PROJECT.md` |

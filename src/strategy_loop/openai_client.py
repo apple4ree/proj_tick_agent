@@ -18,13 +18,14 @@ logger = logging.getLogger(__name__)
 _LOG_DIR = Path(__file__).resolve().parents[2] / "outputs" / "llm_logs"
 
 _MOCK_FEEDBACK = {
+    "evidence": [
+        "Mock evidence: no real backtest analysis was performed.",
+    ],
     "primary_issue": "Mock feedback — no real analysis performed.",
-    "structural_change_required": False,
-    "current_archetype": 1,
-    "next_archetype": "",
     "issues": [],
-    "suggestions": ["Try a higher order_imbalance threshold for fewer but higher-quality signals."],
-    "verdict": "retry",
+    "suggestions": [
+        "Try a higher order_imbalance threshold for fewer but higher-quality signals.",
+    ],
 }
 
 _MOCK_CODE = """\

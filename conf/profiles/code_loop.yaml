@@ -49,7 +49,7 @@ code_loop:
 
 # ── Optuna 최적화 설정 ────────────────────────────────────
 optimization:
-  n_trials: 200                  # Optuna 탐색 횟수 (smoke: 5, prod: 30)
+  n_trials: 30                  # Optuna 탐색 횟수 (smoke: 5, prod: 30)
   lambda_mdd: 1.0
   stage_prefixes: [0.2, 0.5, 1.0]
   enable_pruning: true
@@ -65,7 +65,7 @@ optimization:
 distribution_filter:
   # 진입 빈도 허용 범위 (distribution_filter.py 기본값과 동일)
   min_entry_freq: 0.001         # 0.1% — 이 이하면 진입 조건이 너무 희귀
-  max_entry_freq: 0.70          # 50%  — 이 이상이면 거의 항상 진입
+  max_entry_freq: 0.50          # 50%  — 이 이상이면 거의 항상 진입
   sample_size: 2000             # 판정에 사용할 상태 수
 
 # ── V1 RAG 메모리 설정 ───────────────────────────────────

@@ -22,6 +22,7 @@ class CodeKnowledge:
     task_name: str           # 전략 이름 (e.g. "order_imbalance_momentum_v1")
     code: str                # 생성된 Python 코드
     verdict: str             # "pass" | "retry" | "fail" | "dist_filter"
+    diagnosis_code: str = ""
     net_pnl: float = 0.0
     entry_frequency: float = 0.0
     primary_issue: str = ""
@@ -34,7 +35,10 @@ class CodeKnowledge:
             "Code:",
             self.code,
             "---",
-            f"Verdict: {self.verdict}  net_pnl={self.net_pnl:.1f}  entry_freq={self.entry_frequency:.4f}",
+            (
+                f"Verdict: {self.verdict}  diagnosis={self.diagnosis_code or 'n/a'}  "
+                f"net_pnl={self.net_pnl:.1f}  entry_freq={self.entry_frequency:.4f}"
+            ),
         ]
         if self.primary_issue:
             lines.append(f"Primary issue: {self.primary_issue}")

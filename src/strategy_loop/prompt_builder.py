@@ -133,23 +133,31 @@ def build_code_generation_messages(
 
     if previous_feedback:
         primary = previous_feedback.get("primary_issue", "")
-        structural = previous_feedback.get("structural_change_required", False)
-        next_arch = previous_feedback.get("next_archetype", "")
+        diagnosis_code = previous_feedback.get("diagnosis_code", "")
+        verdict = previous_feedback.get("verdict", "")
+        control_mode = previous_feedback.get("control_mode", "neutral")
         issues = previous_feedback.get("issues", [])
         suggestions = previous_feedback.get("suggestions", [])
 
-        if structural and next_arch:
-            header = (
-                "Previous attempt feedback — STRUCTURAL CHANGE REQUIRED.\n"
-                f"  primary_issue: {primary}\n"
-                f"  → Do NOT just tune constants. Change the strategy logic: {next_arch}"
-            )
-        elif primary:
+        if primary:
             header = f"Previous attempt feedback — fix this first: {primary}"
         else:
             header = "Previous attempt feedback (address these):"
 
-        body_parts = []
+        mode_guidance = {
+            "explore": "Do NOT just tune constants. Change the primary logic family and feature combination.",
+            "repair": "Keep the same general logic family and adjust thresholds, holding logic, or cost filters.",
+            "neutral": "Avoid recent failure patterns, but do not force a large logic-family pivot.",
+        }
+
+        body_parts = [
+            "Controller decision:\n"
+            f"  - verdict={verdict}\n"
+            f"  - diagnosis_code={diagnosis_code}\n"
+            f"  - control_mode={control_mode}",
+            "Control-mode instruction:\n"
+            f"  - {mode_guidance.get(control_mode, mode_guidance['neutral'])}",
+        ]
         if issues:
             body_parts.append("Issues:\n" + "\n".join(f"  - {s}" for s in issues))
         if suggestions:
@@ -183,7 +191,7 @@ def build_code_generation_messages(
 _FEEDBACK_SUMMARY_KEYS: frozenset[str] = frozenset({
     # Trade activity
     "signal_count", "n_states", "n_fills", "parent_order_count", "child_order_count",
-    # PnL — use gross_pnl = net_pnl + commission + slippage + impact for fee_drain_ratio
+    # PnL fields used by Python controller to derive gross/cost metrics.
     "net_pnl", "total_realized_pnl", "total_unrealized_pnl",
     "total_commission", "total_slippage", "total_impact",
     # Execution quality (reliable)
@@ -196,15 +204,23 @@ _FEEDBACK_SUMMARY_KEYS: frozenset[str] = frozenset({
 def build_code_feedback_messages(
     code: str,
     backtest_summary: dict[str, Any],
+    derived_metrics: dict[str, Any],
+    controller_decision: dict[str, Any],
     memory_insights: list[str] | None = None,
 ) -> list[dict]:
     """코드 전략 백테스트 결과에 대한 피드백 생성 메시지."""
     filtered_summary = {k: v for k, v in backtest_summary.items() if k in _FEEDBACK_SUMMARY_KEYS}
     summary_text = json.dumps(filtered_summary, ensure_ascii=False, indent=2)
+    derived_metrics_text = json.dumps(derived_metrics, ensure_ascii=False, indent=2)
+    controller_decision_text = json.dumps(controller_decision, ensure_ascii=False, indent=2)
 
     user_parts = [
         f"Strategy code:\n```python\n{code}\n```",
         f"\nBacktest summary:\n{summary_text}",
+        f"\nDerived metrics (authoritative):\n{derived_metrics_text}",
+        f"\nController decision (authoritative):\n{controller_decision_text}",
+        "\nThe derived metrics and controller decision are precomputed and authoritative. "
+        "Do not recompute them.",
     ]
 
     if memory_insights:

@@ -209,8 +209,12 @@ class LoopRunner:
                 })
                 previous_feedback = {
                     "verdict": "retry",
+                    "diagnosis_code": "distribution_filter",
+                    "severity": "parametric",
+                    "control_mode": "repair",
                     "primary_issue": exc.reason,
                     "structural_change_required": False,
+                    "controller_reasons": [exc.reason],
                     "suggestions": [
                         "Adjust UPPER_CASE threshold constants so generate_signal returns 1 "
                         "between 0.1% and 50% of states.",
@@ -255,14 +259,19 @@ class LoopRunner:
 
             # code 모드: RAG 메모리 추가
             net_pnl_for_rag = bt_summary.get("net_pnl") or 0.0
-            sig_count = bt_summary.get("signal_count") or 0.0
-            n_st = bt_summary.get("n_states") or 1.0
+            derived_metrics = feedback.get("derived_metrics") if isinstance(feedback.get("derived_metrics"), dict) else {}
+            entry_frequency_for_rag = derived_metrics.get("entry_frequency")
+            if not isinstance(entry_frequency_for_rag, (int, float)):
+                sig_count = bt_summary.get("signal_count") or 0.0
+                n_st = bt_summary.get("n_states") or 1.0
+                entry_frequency_for_rag = sig_count / n_st
             rag_memory.add(CodeKnowledge(
                 task_name=strategy_name,
                 code=code,
                 verdict=feedback["verdict"],
+                diagnosis_code=str(feedback.get("diagnosis_code", "")),
                 net_pnl=net_pnl_for_rag,
-                entry_frequency=sig_count / n_st,
+                entry_frequency=float(entry_frequency_for_rag),
                 primary_issue=feedback.get("primary_issue", ""),
                 suggestions=feedback.get("suggestions", []),
             ))
@@ -271,12 +280,15 @@ class LoopRunner:
             net_pnl = bt_summary.get("net_pnl") or 0.0
             signal_count = bt_summary.get("signal_count") or 0.0
             n_states = bt_summary.get("n_states") or 1.0
-            entry_frequency = signal_count / n_states
+            fallback_entry_frequency = signal_count / n_states
+            entry_frequency = feedback.get("derived_metrics", {}).get("entry_frequency", fallback_entry_frequency)
+            if not isinstance(entry_frequency, (int, float)):
+                entry_frequency = fallback_entry_frequency
             current_issue = feedback.get("primary_issue", "")
             session_attempts.append({
                 "iteration": i + 1,
                 "strategy_name": strategy_name,
-                "entry_frequency": entry_frequency,
+                "entry_frequency": float(entry_frequency),
                 "net_pnl": net_pnl,
                 "n_fills": bt_summary.get("n_fills") or 0.0,
                 "verdict": feedback["verdict"],
@@ -328,8 +340,14 @@ class LoopRunner:
                                 "Strategy may be overfit to IS period. "
                                 "Try a more robust entry condition."
                             ),
+                            "diagnosis_code": "oos_fail",
+                            "severity": "structural",
+                            "control_mode": "explore",
                             "structural_change_required": True,
                             "verdict": "retry",
+                            "controller_reasons": [
+                                f"oos_net_pnl={oos_net_pnl:.4f} <= 0",
+                            ],
                         }
                         consecutive_non_pass += 1
                         continue
@@ -342,8 +360,12 @@ class LoopRunner:
                                 f"IS passed but OOS entry condition never fired ({exc.reason}). "
                                 "Strategy is likely overfit to IS period. Use a more general entry condition."
                             ),
+                            "diagnosis_code": "oos_distribution_filter",
+                            "severity": "structural",
+                            "control_mode": "explore",
                             "structural_change_required": True,
                             "verdict": "retry",
+                            "controller_reasons": [exc.reason],
                         }
                         consecutive_non_pass += 1
                         continue
