@@ -17,6 +17,10 @@ BUILTIN_FEATURES: frozenset[str] = frozenset({
     "volume_surprise", "micro_price", "trade_flow",
     "depth_imbalance_l1", "log_bid_depth", "log_ask_depth",
     "bid_depth", "ask_depth",
+    # derived temporal features
+    "order_imbalance_ema", "order_imbalance_delta",
+    "trade_flow_imbalance_ema", "depth_imbalance_ema",
+    "spread_bps_ema",
 })
 
 
@@ -48,6 +52,9 @@ def extract_builtin_features(state: "MarketState") -> dict[str, float]:
             "volume_surprise", "micro_price", "price_impact_buy_bps",
             "price_impact_sell_bps", "depth_imbalance_l1",
             "log_bid_depth", "log_ask_depth", "trade_flow",
+            "order_imbalance_ema", "order_imbalance_delta",
+            "trade_flow_imbalance_ema", "depth_imbalance_ema",
+            "spread_bps_ema",
         ):
             val = state.features.get(key)
             if val is not None:

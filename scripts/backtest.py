@@ -9,17 +9,17 @@
 
     # 기본 실행 (config stack에서 data_dir, fee, latency 등 자동 로드)
     PYTHONPATH=src python scripts/backtest.py \
-        --spec strategies/examples/stateful_cooldown_momentum_v2.0.json \
+        --code-file strategies/examples/order_imbalance_code.py \
         --symbol 005930 --start-date 20260313
 
     # Profile override (config stack 위에 profile YAML을 merge)
     PYTHONPATH=src python scripts/backtest.py \
-        --spec strategies/examples/stateful_cooldown_momentum_v2.0.json \
+        --code-file strategies/examples/order_imbalance_code.py \
         --symbol 005930 --start-date 20260313 --profile smoke
 
     # Explicit override (profile 위에 추가 YAML을 merge)
     PYTHONPATH=src python scripts/backtest.py \
-        --spec strategies/examples/stateful_cooldown_momentum_v2.0.json \
+        --code-file strategies/examples/order_imbalance_code.py \
         --symbol 005930 --start-date 20260313 --config custom_override.yaml
 """
 
@@ -30,8 +30,6 @@ import json
 import logging
 import sys
 from pathlib import Path
-
-import pandas as pd
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
@@ -49,6 +47,7 @@ from monitoring import attach_to_pipeline
 from monitoring.verifiers.batch_verifier import run_all_verifiers
 from monitoring.reporters.exporter import export_monitoring_run
 from strategy_block.strategy.base import Strategy
+from strategy_loop.code_strategy import CodeStrategy
 from utils.config import load_config, get_paths, get_backtest
 
 logger = logging.getLogger(__name__)
@@ -56,7 +55,7 @@ logger = logging.getLogger(__name__)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run layered tick-data backtests.")
-    parser.add_argument("--spec", required=True, help="Path to strategy spec JSON")
+    parser.add_argument("--code-file", required=True, help="Path to strategy Python code file")
     parser.add_argument("--symbol", required=True, help="KRX symbol code, e.g. 005930")
     parser.add_argument("--start-date", required=True, help="Start date YYYYMMDD")
     parser.add_argument("--end-date", default=None, help="End date YYYYMMDD (default: same as start)")
@@ -145,17 +144,16 @@ def build_config(args: argparse.Namespace, bt_cfg: dict | None = None) -> Backte
     )
 
 
-def _load_spec(path: str) -> dict:
-    """Load a simple strategy spec dict from a JSON file."""
-    with open(path, encoding="utf-8") as f:
-        return json.load(f)
+def _load_code(path: str) -> str:
+    """Load strategy Python code from a file."""
+    return Path(path).read_text(encoding="utf-8")
 
 
 def _build_strategy(args: argparse.Namespace) -> Strategy:
-    """Build a strategy from a simple spec JSON file."""
-    from strategy_loop.simple_spec_strategy import SimpleSpecStrategy
-    spec = _load_spec(args.spec)
-    return SimpleSpecStrategy(spec)
+    """Build a CodeStrategy from a Python file."""
+    code = _load_code(args.code_file)
+    strategy_name = Path(args.code_file).stem or "code_strategy"
+    return CodeStrategy(code=code, name=strategy_name)
 
 
 def run_backtest(args: argparse.Namespace, cfg: dict | None = None) -> BacktestResult:
@@ -207,25 +205,7 @@ def backtest_config_from_cfg(
     end_date: str | None = None,
     **overrides: object,
 ) -> BacktestConfig:
-    """Build a :class:`BacktestConfig` from a YAML config dict.
-
-    Bridges the config system (``load_config``) to the typed
-    ``BacktestConfig`` dataclass so that callers don't have to
-    extract individual fields manually.
-
-    매개변수
-    ----------
-    cfg : dict
-        Merged config dict from :func:`utils.config.load_config`.
-    symbol : str
-        KRX symbol code (e.g. ``"005930"``).
-    start_date : str
-        Start date (``YYYYMMDD`` or ``YYYY-MM-DD``).
-    end_date : str, optional
-        End date (defaults to *start_date*).
-    **overrides
-        Additional keyword overrides forwarded to ``BacktestConfig``.
-    """
+    """Build a :class:`BacktestConfig` from a YAML config dict."""
     bt = get_backtest(cfg)
     end_date = end_date or start_date
     base = {

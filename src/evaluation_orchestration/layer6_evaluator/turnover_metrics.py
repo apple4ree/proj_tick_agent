@@ -157,10 +157,10 @@ class TurnoverMetrics:
             fills, avg_portfolio_value, n_periods, annualization_factor
         )
 
-        # Holding periods
-        holding_periods_by_symbol = cls.compute_holding_periods(positions_history)
-        all_holding_periods = list(holding_periods_by_symbol.values())
-        avg_holding = float(np.mean(all_holding_periods)) if all_holding_periods else 0.0
+        # Holding periods — computed from fills (BUY→SELL pairs) in ticks.
+        # positions_history sampling (every 60 ticks) is too coarse for intraday
+        # strategies with short holding times and produces grossly inflated values.
+        avg_holding = cls.compute_avg_holding_ticks(fills)
 
         # Fill-level returns for IQM / outlier analysis
         # Use slippage_bps as a per-fill return proxy
@@ -223,6 +223,44 @@ class TurnoverMetrics:
     # ------------------------------------------------------------------
     # Holding periods
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def compute_avg_holding_ticks(
+        fills: list["FillEvent"],
+        tick_seconds: float = 1.0,
+    ) -> float:
+        """Compute average holding period in ticks from fill timestamps.
+
+        Matches each BUY fill to the next SELL fill for the same symbol and
+        measures the elapsed time. Returns the mean across all matched pairs,
+        expressed in ticks (seconds / tick_seconds).
+
+        Falls back to 0.0 when no matched round-trips exist.
+        """
+        from market_simulation.layer5_simulator.bookkeeper import OrderSide  # noqa: F401
+
+        if not fills:
+            return 0.0
+
+        # Group fills by symbol
+        by_symbol: dict[str, list] = {}
+        for f in fills:
+            by_symbol.setdefault(f.symbol, []).append(f)
+
+        durations: list[float] = []
+        for sym_fills in by_symbol.values():
+            sym_fills_sorted = sorted(sym_fills, key=lambda f: f.timestamp)
+            pending_buys: list = []
+            for f in sym_fills_sorted:
+                side_str = f.side.name if hasattr(f.side, "name") else str(f.side).upper()
+                if "BUY" in side_str:
+                    pending_buys.append(f.timestamp)
+                elif "SELL" in side_str and pending_buys:
+                    buy_ts = pending_buys.pop(0)
+                    elapsed_s = (f.timestamp - buy_ts).total_seconds()
+                    durations.append(elapsed_s / tick_seconds)
+
+        return float(np.mean(durations)) if durations else 0.0
 
     @staticmethod
     def compute_holding_periods(

@@ -151,6 +151,7 @@ class MarketStateBuilder:
         원시 또는 부분 전처리된 LOB/체결 DataFrame을 MarketState 객체로 변환한다.
         """
         validate_resample_freq(resample_freq)
+        self.feature_pipeline.reset()   # clear intraday EMA state for each new day
         n_input_rows = len(lob_df)
         if lob_df.empty:
             empty_stats = CleaningStats(0, 0, 0, 0, 0, 0)

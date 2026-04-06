@@ -12,7 +12,7 @@
 ## 파이프라인에서의 위치
 
 ```
-SimpleSpecStrategy + MarketState[]
+CodeStrategy + MarketState[]
   → PipelineRunner.run()
   → Signal → Target → Order → Fill → PnL/Metrics
   → ReportBuilder → summary.json + CSV + plots

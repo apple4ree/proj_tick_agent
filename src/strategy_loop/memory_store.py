@@ -4,13 +4,18 @@ strategy_loop/memory_store.py
 Two-level JSON memory:
 
   1. Per-strategy record  → memory_dir/strategies/{run_id}.json
-     { "spec": {...}, "backtest_summary": {...}, "feedback": {...} }
+     {
+       "strategy_name": "...",
+       "code": "...",
+       "backtest_summary": {...},
+       "feedback": {...}
+     }
 
   2. Global insights file → memory_dir/global_memory.json
-     { "insights": ["insight1", "insight2", ...] }
-
-전략 루프가 각 iteration 후 결과를 저장하고,
-다음 iteration 에서 global insights 를 읽어 LLM 프롬프트에 삽입한다.
+     {
+       "insights": ["..."],
+       "failure_patterns": ["..."]
+     }
 """
 from __future__ import annotations
 
@@ -37,14 +42,16 @@ class MemoryStore:
     def save_strategy(
         self,
         run_id: str,
-        spec: dict[str, Any],
+        strategy_name: str,
+        code: str,
         backtest_summary: dict[str, Any],
         feedback: dict[str, Any],
     ) -> Path:
-        """Save one strategy run record. Returns path to the saved file."""
+        """Save one code-strategy run record. Returns the saved path."""
         record = {
             "run_id": run_id,
-            "spec": spec,
+            "strategy_name": strategy_name,
+            "code": code,
             "backtest_summary": backtest_summary,
             "feedback": feedback,
         }
@@ -63,14 +70,14 @@ class MemoryStore:
         """Return the current list of cross-strategy insights."""
         return self._load_global().get("insights", [])
 
-    def append_insights(self, new_insights: list[str]) -> None:
-        """Append new insights to global memory (deduped)."""
+    def append_insights(self, new_insights: list[str], max_count: int = 10) -> None:
+        """Append new insights to global memory (deduped, capped at max_count)."""
         data = self._load_global()
         existing = data.get("insights", [])
         combined = existing + [s for s in new_insights if s not in existing]
-        data["insights"] = combined
+        data["insights"] = combined[-max_count:]
         self._save_global(data)
-        logger.debug("MemoryStore: global insights updated (%d total)", len(combined))
+        logger.debug("MemoryStore: global insights updated (%d total)", len(data["insights"]))
 
     # ── failure patterns ──────────────────────────────────────────────
 
@@ -78,23 +85,23 @@ class MemoryStore:
         """Return the accumulated list of failure patterns (from feedback issues)."""
         return self._load_global().get("failure_patterns", [])
 
-    def append_failure_patterns(self, new_patterns: list[str]) -> None:
-        """Append failure patterns to global memory (deduped)."""
+    def append_failure_patterns(self, new_patterns: list[str], max_count: int = 10) -> None:
+        """Append failure patterns to global memory (deduped, capped at max_count)."""
         data = self._load_global()
         existing = data.get("failure_patterns", [])
         combined = existing + [s for s in new_patterns if s not in existing]
-        data["failure_patterns"] = combined
+        data["failure_patterns"] = combined[-max_count:]
         self._save_global(data)
-        logger.debug("MemoryStore: failure patterns updated (%d total)", len(combined))
+        logger.debug("MemoryStore: failure patterns updated (%d total)", len(data["failure_patterns"]))
 
     # ── internal ──────────────────────────────────────────────────────
 
-    def _load_global(self) -> dict:
+    def _load_global(self) -> dict[str, Any]:
         if not self._global_path.exists():
             return {}
         return json.loads(self._global_path.read_text(encoding="utf-8"))
 
-    def _save_global(self, data: dict) -> None:
+    def _save_global(self, data: dict[str, Any]) -> None:
         self._global_path.write_text(
             json.dumps(data, ensure_ascii=False, indent=2),
             encoding="utf-8",

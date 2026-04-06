@@ -1,25 +1,26 @@
 """
-전략 생성 → Hard Gate → 백테스트 → 피드백 → Memory 저장 반복 루프 CLI.
+코드 전략 생성 → Hard Gate → 백테스트 → 피드백 → Memory 저장 반복 루프 CLI.
 
 사용법:
     cd /home/dgu/tick/proj_rl_agent
 
-    # mock 모드 (LLM 없이 테스트)
+    # mock 모드 (LLM 없이 테스트, OOS 없음)
     PYTHONPATH=src python scripts/run_strategy_loop.py \\
         --research-goal "order imbalance momentum" \\
-        --symbol 005930 --start-date 20260313 \\
+        --symbol 005930 --is-start 20260313 --is-end 20260313 \\
         --mode mock --n-iter 3
 
-    # 실제 OpenAI 사용
+    # IS/OOS 분리 (실제 OpenAI 사용)
     OPENAI_API_KEY=sk-... PYTHONPATH=src python scripts/run_strategy_loop.py \\
         --research-goal "spread mean reversion" \\
-        --symbol 005930 --start-date 20260313 --end-date 20260314 \\
+        --symbol 005930 \\
+        --is-start 20260313 --is-end 20260319 \\
+        --oos-start 20260320 --oos-end 20260326 \\
         --mode live --model gpt-4o-mini --n-iter 10
 """
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import sys
 from pathlib import Path
@@ -33,20 +34,28 @@ for _p in (PROJECT_ROOT, SRC_ROOT):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
+from strategy_loop.date_ranges import DateRanges
 from strategy_loop.loop_runner import LoopRunner
 from strategy_loop.openai_client import OpenAIClient
-from utils.config import load_config, get_paths, get_backtest
+from utils.config import load_config, get_paths
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Iterative strategy loop runner.")
     p.add_argument("--research-goal", required=True, help="Natural language research goal for strategy generation")
-    p.add_argument("--symbol", required=True, help="KRX symbol code, e.g. 005930")
-    p.add_argument("--start-date", required=True, help="Start date YYYYMMDD")
-    p.add_argument("--end-date", default=None, help="End date YYYYMMDD (default: same as start)")
+    p.add_argument("--symbols", default=None, help="Comma-separated KRX symbol codes, e.g. 005930,000660,005380")
+    p.add_argument("--symbol", default=None, help="Single KRX symbol code (shorthand for --symbols with one entry)")
+    # IS date range (required)
+    p.add_argument("--is-start", required=True, help="In-sample start date YYYYMMDD")
+    p.add_argument("--is-end", required=True, help="In-sample end date YYYYMMDD")
+    # OOS date range (optional)
+    p.add_argument("--oos-start", default=None, help="Out-of-sample start date YYYYMMDD (omit for no OOS check)")
+    p.add_argument("--oos-end", default=None, help="Out-of-sample end date YYYYMMDD")
     p.add_argument("--n-iter", type=int, default=5, help="Max number of loop iterations (default: 5)")
+    p.add_argument("--optimize-n-trials", type=int, default=20,
+                   help="Optuna threshold optimization trials per iteration (0 = disabled, default: 20)")
     p.add_argument("--mode", choices=["live", "mock"], default="mock", help="LLM mode (default: mock)")
-    p.add_argument("--model", default="gpt-4o-mini", help="OpenAI model name (live mode only)")
+    p.add_argument("--model", default="gpt-4o", help="OpenAI model name (live mode only)")
     p.add_argument("--memory-dir", default=None, help="Directory for memory storage (default: outputs/memory)")
     p.add_argument("--output-dir", default=None, help="Directory for backtest artifacts (default: outputs/backtests)")
     p.add_argument("--config", default=None, help="Optional YAML config override path")
@@ -72,25 +81,50 @@ def main() -> None:
     output_dir = args.output_dir or (outputs_dir + "/backtests")
 
     client = OpenAIClient(model=args.model, mode=args.mode)
-    runner = LoopRunner(client=client, memory_dir=memory_dir, output_dir=output_dir)
+    runner = LoopRunner(
+        client=client,
+        memory_dir=memory_dir,
+        output_dir=output_dir,
+        optimize_n_trials=args.optimize_n_trials,
+    )
 
+    if args.symbols:
+        symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
+    elif args.symbol:
+        symbols = [args.symbol]
+    else:
+        raise SystemExit("error: one of --symbol or --symbols is required")
+
+    # Validate OOS args: both must be provided together or not at all
+    if bool(args.oos_start) != bool(args.oos_end):
+        raise SystemExit("error: --oos-start and --oos-end must be provided together")
+
+    date_ranges = DateRanges(
+        is_start=args.is_start,
+        is_end=args.is_end,
+        oos_start=args.oos_start,
+        oos_end=args.oos_end,
+    )
+
+    oos_str = f"  OOS={date_ranges.oos_start}..{date_ranges.oos_end}" if date_ranges.has_oos else "  OOS=none"
     print("=" * 72)
-    print(f"Strategy Loop | goal='{args.research_goal}' | symbol={args.symbol}")
-    print(f"  dates={args.start_date}..{args.end_date or args.start_date} | n_iter={args.n_iter} | mode={args.mode}")
+    print(f"Strategy Loop | goal='{args.research_goal}' | symbols={','.join(symbols)}")
+    print(f"  IS={date_ranges.is_start}..{date_ranges.is_end}{oos_str}")
+    print(f"  llm_mode={args.mode} | strategy_mode=code | n_iter={args.n_iter}")
     print("=" * 72)
 
     result = runner.run(
         research_goal=args.research_goal,
         n_iterations=args.n_iter,
         data_dir=data_dir,
-        symbol=args.symbol,
-        start_date=args.start_date,
-        end_date=args.end_date,
+        symbols=symbols,
+        date_ranges=date_ranges,
         cfg=cfg,
     )
 
     print("\n─── Loop Summary ─────────────────────────────────────────────")
     print(f"  Final verdict : {result.verdict}")
+    print(f"  OOS verdict   : {result.oos_verdict}")
     print(f"  Best run_id   : {result.best_run_id or 'none'}")
     print(f"  Iterations    : {len(result.iterations)}")
     for rec in result.iterations:

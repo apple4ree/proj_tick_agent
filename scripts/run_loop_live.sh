@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# live 모드 — 실제 OpenAI API 사용
-# 실행 전 OPENAI_API_KEY 환경변수 설정 필요
+# Live mode - uses the real OpenAI API
+# OPENAI_API_KEY must be set before running
 #   export OPENAI_API_KEY=sk-...
 set -euo pipefail
 
@@ -10,8 +10,9 @@ cd "$(dirname "$0")/.."
 
 PYTHONPATH=src python scripts/run_strategy_loop.py \
     --research-goal "order imbalance momentum" \
-    --symbol 005930 \
-    --start-date 20260313 \
+    --symbols 000660 \
+    --is-start 20260313 --is-end 20260313 \
+    --optimize-n-trials 20 \
     --mode live \
-    --model gpt-4o-mini \
-    --n-iter 5
+    --model gpt-4o \
+    --n-iter 30

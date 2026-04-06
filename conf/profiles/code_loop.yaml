@@ -1,0 +1,74 @@
+# ==============================================
+# Code Loop 프로필 — CoSTEER + Optuna 하이브리드 전략 생성
+# ==============================================
+#
+# 사용법:
+#   scripts/run_code_loop_live.sh   (live 실행)
+#   scripts/run_code_loop_smoke.sh  (smoke 테스트)
+#
+# 주요 설정 그룹:
+#   app             — 로깅 수준
+#   backtest        — 백테스트 시뮬레이터 파라미터
+#   code_loop       — 코드 생성 루프 전용 설정
+#   optimization    — Optuna 최적화 설정
+
+app:
+  env: prod
+  log_level: INFO
+
+backtest:
+  initial_cash: 100000000   # KRW (1억)
+  seed: 42
+  resample: "1s"
+  trade_lookback: 100
+  latency_ms: 100.0
+  fee_model: krx
+  slicing_algo: TWAP
+  placement_style: spread_adaptive
+  exchange_model: partial_fill
+  queue_model: prob_queue
+  queue_position_assumption: 0.5
+  market_data_delay_ms: 0.0
+  decision_compute_ms: 0.0
+  compute_attribution: false  # code loop에서는 attribution 불필요
+
+# ── 코드 생성 루프 전용 설정 ───────────────────────────────
+code_loop:
+  # LLM 설정
+  model: gpt-4o           # 비용 효율적 기본값. 품질 우선이면 gpt-4o
+
+  # 루프 제어
+  n_iter: 10                    # 최대 반복 횟수
+  # IS / OOS 날짜는 .sh 스크립트에서 주입 (날짜는 데이터에 따라 다름)
+
+  # 탐색 목표 (기본값 — .sh에서 --research-goal로 override 가능)
+  research_goal: "generate a selective long-only KRX tick strategy that enters only when order-imbalance momentum is strong enough to persist beyond 1s resampling noise, is confirmed by broader book or trade-flow support, and appears while spread and impact are low enough for the trade to retain positive expectancy after fees."
+
+  # 심볼 (기본값)
+  symbols: "000660"             # 쉼표 구분: "000660,005930"
+
+# ── Optuna 최적화 설정 ────────────────────────────────────
+optimization:
+  n_trials: 200                  # Optuna 탐색 횟수 (smoke: 5, prod: 30)
+  lambda_mdd: 1.0
+  stage_prefixes: [0.2, 0.5, 1.0]
+  enable_pruning: true
+  #
+  # 탐색 범위 주석 (threshold_optimizer.py _CODE_CONST_RANGES 참조):
+  #   HOLDING*TICKS  → int   [5, 120]
+  #   *IMBALANCE*    → float [-0.9, 0.9]
+  #   *SPREAD*BPS*   → float [1.0, 200.0]
+  #   *IMPACT*BPS*   → float [0.5, 50.0]
+  #   others         → float [-5.0, 5.0]
+
+# ── 분포 필터 설정 ────────────────────────────────────────
+distribution_filter:
+  # 진입 빈도 허용 범위 (distribution_filter.py 기본값과 동일)
+  min_entry_freq: 0.001         # 0.1% — 이 이하면 진입 조건이 너무 희귀
+  max_entry_freq: 0.70          # 50%  — 이 이상이면 거의 항상 진입
+  sample_size: 2000             # 판정에 사용할 상태 수
+
+# ── V1 RAG 메모리 설정 ───────────────────────────────────
+rag_memory:
+  max_failures: 5               # 프롬프트에 주입할 최근 실패 최대 수
+  max_successes: 3              # 프롬프트에 주입할 최근 성공 최대 수

@@ -14,9 +14,10 @@ Features computed:
 """
 from __future__ import annotations
 
+import collections
 import logging
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
@@ -45,8 +46,15 @@ class MicrostructureFeatures:
     mid_price: float
     price_impact_buy_bps: float     # cost to buy `impact_shares` shares (walk-book)
     price_impact_sell_bps: float    # cost to sell `impact_shares` shares (walk-book)
-    trade_flow: Optional[float]     # net signed volume (recent trades)
-    volume_surprise: Optional[float]
+    trade_flow: Optional[float] = None      # net signed volume (recent trades)
+    volume_surprise: Optional[float] = None
+
+    # derived temporal features (computed by FeaturePipeline across ticks)
+    order_imbalance_ema: float = 0.0        # EMA of order_imbalance (α=0.2, ~5-tick decay)
+    order_imbalance_delta: float = 0.0      # order_imbalance[t] − order_imbalance[t−5]
+    trade_flow_imbalance_ema: float = 0.0   # EMA of trade_flow_imbalance (α=0.2)
+    depth_imbalance_ema: float = 0.0        # EMA of depth_imbalance (α=0.2)
+    spread_bps_ema: float = 0.0             # EMA of spread_bps (α=0.1, slow baseline)
 
     # ------------------------------------------------------------------
     # 변환 도우미
@@ -64,6 +72,11 @@ class MicrostructureFeatures:
             "price_impact_sell_bps": self.price_impact_sell_bps,
             "trade_flow": self.trade_flow if self.trade_flow is not None else 0.0,
             "volume_surprise": self.volume_surprise if self.volume_surprise is not None else 0.0,
+            "order_imbalance_ema": self.order_imbalance_ema,
+            "order_imbalance_delta": self.order_imbalance_delta,
+            "trade_flow_imbalance_ema": self.trade_flow_imbalance_ema,
+            "depth_imbalance_ema": self.depth_imbalance_ema,
+            "spread_bps_ema": self.spread_bps_ema,
         }
 
     def to_array(self) -> np.ndarray:
@@ -83,6 +96,11 @@ class MicrostructureFeatures:
             "price_impact_sell_bps",
             "trade_flow",
             "volume_surprise",
+            "order_imbalance_ema",
+            "order_imbalance_delta",
+            "trade_flow_imbalance_ema",
+            "depth_imbalance_ema",
+            "spread_bps_ema",
         ]
 
 
@@ -103,9 +121,27 @@ class FeaturePipeline:
         and volume_surprise.
     """
 
+    _ALPHA_FAST: float = 0.2   # ~5-tick EMA (order_imbalance, trade_flow_imbalance, depth_imbalance)
+    _ALPHA_SLOW: float = 0.1   # ~10-tick EMA (spread baseline)
+    _DELTA_LAG: int = 5        # ticks back for order_imbalance_delta
+
     def __init__(self, impact_shares: int = 1_000, trade_window: int = 10) -> None:
         self.impact_shares = impact_shares
         self.trade_window = trade_window
+        # stateful EMA accumulators — reset at the start of each trading day
+        self._oi_ema: Optional[float] = None
+        self._tfi_ema: Optional[float] = None
+        self._di_ema: Optional[float] = None
+        self._spread_ema: Optional[float] = None
+        self._oi_history: collections.deque = collections.deque(maxlen=self._DELTA_LAG + 1)
+
+    def reset(self) -> None:
+        """Reset intraday EMA state. Call at the beginning of each new trading day."""
+        self._oi_ema = None
+        self._tfi_ema = None
+        self._di_ema = None
+        self._spread_ema = None
+        self._oi_history.clear()
 
     # ------------------------------------------------------------------
     # 주요 진입점
@@ -168,6 +204,38 @@ class FeaturePipeline:
                 long_window=max(self.trade_window * 10, 100),
             )
 
+        # --- Derived temporal features ---
+        # EMA update (initialize on first call, then exponential smoothing)
+        def _ema(prev: Optional[float], val: float, alpha: float) -> float:
+            return val if prev is None else alpha * val + (1.0 - alpha) * prev
+
+        self._oi_ema = _ema(self._oi_ema, order_imbalance, self._ALPHA_FAST)
+        self._spread_ema = _ema(self._spread_ema, spread_bps, self._ALPHA_SLOW)
+
+        # depth_imbalance (L1) as proxy — same range as order_imbalance
+        self._di_ema = _ema(self._di_ema, depth_imbalance_l1, self._ALPHA_FAST)
+
+        # trade_flow_imbalance from trades (0.0 when unavailable)
+        tfi_raw: float = 0.0
+        if trades is not None and not trades.empty:
+            trades_norm2 = self._normalise_trade_df(trades)
+            if "side" in trades_norm2.columns:
+                recent_t = trades_norm2.tail(self.trade_window)
+                signs = recent_t["side"].apply(
+                    lambda s: 1.0 if str(s).lower() in ("buy", "b", "1") else -1.0
+                )
+                n = len(signs)
+                if n > 0:
+                    tfi_raw = float(signs.sum() / n)
+        self._tfi_ema = _ema(self._tfi_ema, tfi_raw, self._ALPHA_FAST)
+
+        # 5-tick delta of order_imbalance
+        self._oi_history.append(order_imbalance)
+        if len(self._oi_history) == self._DELTA_LAG + 1:
+            oi_delta = order_imbalance - self._oi_history[0]
+        else:
+            oi_delta = 0.0
+
         return MicrostructureFeatures(
             spread_bps=spread_bps,
             order_imbalance=order_imbalance,
@@ -179,6 +247,11 @@ class FeaturePipeline:
             price_impact_sell_bps=price_impact_sell_bps,
             trade_flow=trade_flow,
             volume_surprise=volume_surprise,
+            order_imbalance_ema=self._oi_ema,
+            order_imbalance_delta=oi_delta,
+            trade_flow_imbalance_ema=self._tfi_ema,
+            depth_imbalance_ema=self._di_ema,
+            spread_bps_ema=self._spread_ema,
         )
 
     # ------------------------------------------------------------------
