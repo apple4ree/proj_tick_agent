@@ -112,7 +112,17 @@ class PlacementConfig:
 
     @classmethod
     def from_dict(cls, d: dict) -> PlacementConfig:
-        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
+        coerce: dict[str, type] = {
+            "aggression_spread_threshold_bps": float,
+            "imbalance_threshold": float,
+            "offset_ticks": int,
+            "tick_size": float,
+        }
+        filtered = {k: v for k, v in d.items() if k in cls.__dataclass_fields__}
+        for field_name, type_fn in coerce.items():
+            if field_name in filtered:
+                filtered[field_name] = type_fn(filtered[field_name])
+        return cls(**filtered)
 
 
 @dataclass
@@ -129,6 +139,11 @@ class RiskConfig:
     @classmethod
     def from_dict(cls, d: dict) -> RiskConfig:
         return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
+
+
+# Module-level constant: matches PlacementConfig.tick_size default.
+# Defined here (not inside BacktestConfig) so it never appears as a dataclass field.
+_PLACEMENT_TICK_SIZE_DEFAULT: float = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +239,7 @@ class BacktestConfig:
 
     compute_attribution: bool = True
     annualization_factor: int = 252
+    tick_size: float = 1.0
 
     # --- Nested configs (qlib-style) ---
     fee: FeeConfig | None = field(default=None)
@@ -252,6 +268,39 @@ class BacktestConfig:
     def __post_init__(self) -> None:
         self._resolve_configs()
         self._validate()
+
+    def _unify_tick_size(self) -> None:
+        """Enforce the canonical invariant: self.tick_size == self.placement.tick_size.
+
+        Priority rules (placement must already exist when this is called):
+          1. Both provided, different, both non-default  → ValueError (split contract)
+          2. placement.tick_size is non-default, top-level is default → placement wins
+          3. Otherwise (top-level is non-default, or both are default)  → top-level wins
+
+        After resolution both self.tick_size and self.placement.tick_size are
+        normalised to float canonical form.
+        """
+        t_ts = float(self.tick_size)
+        p_ts = float(self.placement.tick_size)
+        default = _PLACEMENT_TICK_SIZE_DEFAULT
+
+        if t_ts != p_ts:
+            if t_ts != default and p_ts != default:
+                raise ValueError(
+                    f"tick_size conflict: top-level tick_size={t_ts} and "
+                    f"placement.tick_size={p_ts} must match. "
+                    "Set one of them or provide the same value for both."
+                )
+            if p_ts != default:
+                # placement carries an explicit non-default value; adopt it as canonical
+                t_ts = p_ts
+            else:
+                # top-level is canonical (or both are default); sync placement
+                p_ts = t_ts
+
+        # Always write back float canonical form to both sides
+        self.tick_size = t_ts
+        self.placement.tick_size = p_ts
 
     def _resolve_configs(self) -> None:
         """Synthesize nested configs from flat fields if not provided."""
@@ -282,7 +331,10 @@ class BacktestConfig:
         if self.slicing is None:
             self.slicing = SlicingConfig(algo=self.slicing_algo)
         if self.placement is None:
-            self.placement = PlacementConfig(style=self.placement_style)
+            self.tick_size = float(self.tick_size)
+            self.placement = PlacementConfig(style=self.placement_style, tick_size=self.tick_size)
+        else:
+            self._unify_tick_size()
         if self.risk is None:
             self.risk = RiskConfig()
 
@@ -377,6 +429,7 @@ class BacktestConfig:
             "latency_alias_applied": bool(getattr(self, "_latency_alias_applied", False)),
             "compute_attribution": self.compute_attribution,
             "annualization_factor": self.annualization_factor,
+            "tick_size": self.tick_size,
             # Nested configs
             "fee": self.fee.to_dict() if self.fee else None,
             "latency": self.latency.to_dict() if self.latency else None,
@@ -404,6 +457,7 @@ class BacktestConfig:
             "queue_position_assumption": float,
             "market_data_delay_ms": float,
             "decision_compute_ms": float,
+            "tick_size": float,
         }
         for field_name, type_fn in numeric_fields.items():
             if field_name in d and isinstance(d[field_name], str):
@@ -457,7 +511,31 @@ class BacktestConfig:
 
         Supports both flat overrides (e.g., {"fee_model": "zero"})
         and nested overrides (e.g., {"fee": {"commission_bps": 0.5}}).
+
+        tick_size invariant: merged.tick_size == merged.placement.tick_size always.
+        Rules:
+          - Only top-level overridden  → placement.tick_size set to same value.
+          - Only placement.tick_size overridden → top-level set to same value.
+          - Both overridden, same value → fine.
+          - Both overridden, different values → ValueError.
         """
+        # Detect tick_size in overrides before merging
+        top_ts_override = overrides.get("tick_size")
+        placement_override_dict = overrides.get("placement")
+        nested_ts_override = (
+            placement_override_dict.get("tick_size")
+            if isinstance(placement_override_dict, dict)
+            else None
+        )
+
+        if top_ts_override is not None and nested_ts_override is not None:
+            if float(top_ts_override) != float(nested_ts_override):
+                raise ValueError(
+                    f"merge(): tick_size conflict: top-level={top_ts_override}, "
+                    f"placement.tick_size={nested_ts_override}. "
+                    "Provide the same value or omit one."
+                )
+
         base = self.to_dict()
 
         for key, value in overrides.items():
@@ -466,6 +544,13 @@ class BacktestConfig:
                 base[key].update(value)
             else:
                 base[key] = value
+
+        # Propagate canonical tick_size to the other side
+        if top_ts_override is not None and nested_ts_override is None:
+            if isinstance(base.get("placement"), dict):
+                base["placement"]["tick_size"] = float(top_ts_override)
+        elif nested_ts_override is not None and top_ts_override is None:
+            base["tick_size"] = float(nested_ts_override)
 
         return BacktestConfig.from_dict(base)
 

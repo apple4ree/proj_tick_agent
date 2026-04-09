@@ -43,12 +43,13 @@ _PRUNER_INTERVAL_STEPS: int = 1
 # (regex_pattern, (lo, hi, log, is_int))
 _CODE_CONST_RANGES: list[tuple[str, tuple]] = [
     (r"HOLDING.?TICKS",                (5.0,   120.0, False, True)),
+    (r"SPREAD.*TICKS|TICKS.*SPREAD",  (1.0,    10.0, False, True)),
     (r"IMBALANCE|OI_|_OI",             (-0.9,    0.9, False, False)),
     (r"EMA|DELTA",                     (-0.9,    0.9, False, False)),
     (r"SPREAD.*BPS|BPS.*SPREAD",       (1.0,   200.0, False, False)),
     (r"IMPACT.*BPS|BPS.*IMPACT",       (0.5,    50.0, False, False)),
     (r"VOLUME.*SURPRISE|SURPRISE",     (-2.0,    5.0, False, False)),
-    (r"MULTIPLIER|RATIO|FACTOR",       (0.5,    10.0, False, False)),
+    (r"MULTIPLIER|RATIO|FACTOR",       (0.1,     5.0, False, False)),
 ]
 _DEFAULT_CODE_RANGE: tuple = (-5.0, 5.0, False, False)
 
@@ -228,7 +229,8 @@ def _run_candidate_stage_backtest(
     from evaluation_orchestration.layer7_validation import PipelineRunner
     from strategy_loop.code_strategy import CodeStrategy
 
-    strategy = CodeStrategy(code=candidate_code, name="optuna_candidate")
+    tick_size = float(getattr(backtest_config, "tick_size", 1.0))
+    strategy = CodeStrategy(code=candidate_code, name="optuna_candidate", tick_size=tick_size)
     runner = PipelineRunner(
         config=backtest_config,
         data_dir=str(data_dir),

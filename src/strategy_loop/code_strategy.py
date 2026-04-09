@@ -53,11 +53,18 @@ if TYPE_CHECKING:
 class CodeStrategy(Strategy):
     """LLM이 생성한 Python 코드 문자열을 실행하는 Strategy 구현체."""
 
-    def __init__(self, code: str, name: str = "code_strategy") -> None:
+    def __init__(
+        self,
+        code: str,
+        name: str = "code_strategy",
+        *,
+        tick_size: float = 1.0,
+    ) -> None:
         """
         Args:
             code: exec 가능한 Python 전략 코드 문자열
             name: 전략 이름 (로그/저장에 사용)
+            tick_size: 종목 틱 크기 (매 tick feature dict에 주입됨). 기본값 1.0.
 
         Raises:
             CodeSandboxError: AST 검증 실패 또는 실행 오류
@@ -65,6 +72,7 @@ class CodeStrategy(Strategy):
         """
         self._code = code
         self._name = name
+        self._tick_size: float = float(tick_size)
         self._in_position: bool = False
         self._position_side: str | None = None
         self._holding_ticks: int = 0
@@ -93,7 +101,7 @@ class CodeStrategy(Strategy):
     def generate_signal(self, state: "MarketState") -> "Signal | None":
         from execution_planning.layer1_signal import Signal
 
-        features = extract_builtin_features(state)
+        features = extract_builtin_features(state, tick_size=self._tick_size)
         position = {
             "holding_ticks": float(self._holding_ticks),
             "in_position": self._in_position,

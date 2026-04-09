@@ -3,7 +3,7 @@ risk_metrics.py
 ---------------
 Layer 6: Risk Metrics
 
-Computes standard quantitative risk metrics from a PnL / returns series:
+Computes standard quantitative risk metrics from an equity series:
   - Volatility, Sharpe, Sortino, Calmar
   - Maximum Drawdown (value and duration)
   - Value at Risk (VaR) and Expected Shortfall (CVaR)
@@ -116,7 +116,7 @@ class RiskReport:
 
 class RiskMetrics:
     """
-    Stateless utility class for computing risk metrics from a PnL series.
+    Stateless utility class for computing risk metrics from an equity series.
 
     All methods are class methods / static methods so no instantiation
     is required, but the class is used as a namespace.
@@ -131,13 +131,14 @@ class RiskMetrics:
         period: str = "full",
     ) -> RiskReport:
         """
-        Compute the full RiskReport from a cumulative PnL series.
+        Compute the full RiskReport from an equity / portfolio value series.
 
         매개변수
         ----------
         pnl_series : pd.Series
-            Cumulative PnL indexed by timestamp.  Values should be in KRW
-            (or any currency unit); metrics are scale-invariant ratios.
+            Equity / portfolio value indexed by timestamp. Values should be in
+            KRW (or any currency unit). Passing raw cumulative PnL without an
+            initial-capital baseline will distort drawdown ratios.
         freq : str
             'tick' | 'minute' | 'daily' — used to pick the right
             periods_per_year for the annualization_factor.
@@ -160,8 +161,9 @@ class RiskMetrics:
         if len(pnl_series) < 2:
             return cls._empty_report(period)
 
-        # Period returns: differences of cumulative PnL
-        returns = pnl_series.diff().dropna()
+        # Standard risk metrics should be based on fractional portfolio
+        # returns, not raw PnL deltas.
+        returns = cls._compute_period_returns(pnl_series)
 
         if len(returns) == 0:
             return cls._empty_report(period)
@@ -171,11 +173,11 @@ class RiskMetrics:
         # Determine periods per year based on freq
         periods_per_year = cls._periods_per_year(freq, annualization_factor)
 
-        # Volatility
+        # Volatility of fractional period returns
         period_std = float(np.std(ret_arr, ddof=1)) if len(ret_arr) > 1 else 0.0
         ann_vol = cls._annualize_vol(period_std, periods_per_year)
 
-        # Mean return (annualized)
+        # Mean return (annualized arithmetic return)
         mean_ret = float(np.mean(ret_arr))
         ann_return = mean_ret * periods_per_year
 
@@ -188,10 +190,10 @@ class RiskMetrics:
         es_95 = cls._compute_es(ret_arr, confidence=0.95)
         es_99 = cls._compute_es(ret_arr, confidence=0.99)
 
-        # Sharpe (annualized mean / annualized vol)
+        # Sharpe (annualized arithmetic mean return / annualized vol)
         sharpe = ann_return / ann_vol if ann_vol > 0.0 else 0.0
 
-        # Sortino: downside deviation
+        # Sortino: downside deviation on negative period returns
         downside = ret_arr[ret_arr < 0]
         if len(downside) > 1:
             downside_std = float(np.std(downside, ddof=1))
@@ -238,7 +240,7 @@ class RiskMetrics:
         매개변수
         ----------
         cum_returns : pd.Series
-            Cumulative PnL / portfolio value series (levels, not returns).
+            Equity / portfolio value series (levels, not returns).
 
         반환값
         -------
@@ -250,12 +252,14 @@ class RiskMetrics:
         if len(vals) == 0:
             return 0.0, 0
 
-        # Shift so minimum value is > 0 to avoid division issues
-        offset = abs(min(vals)) + 1.0
-        vals_adj = vals + offset
+        min_val = float(np.min(vals))
+        if min_val <= 0.0:
+            # A non-positive level breaks the usual drawdown denominator. Shift
+            # only in that case; positive equity curves should be left unchanged.
+            vals = vals + (abs(min_val) + 1.0)
 
-        peak = np.maximum.accumulate(vals_adj)
-        drawdown = (peak - vals_adj) / peak
+        peak = np.maximum.accumulate(vals)
+        drawdown = (peak - vals) / peak
 
         max_dd = float(np.max(drawdown))
 
@@ -271,6 +275,29 @@ class RiskMetrics:
                 cur_dur = 0
 
         return max_dd, max_dur
+
+    @staticmethod
+    def _compute_period_returns(equity_series: pd.Series) -> pd.Series:
+        """
+        Convert an equity curve into fractional period returns.
+
+        Returns are computed as (equity_t / equity_{t-1}) - 1 and rows with a
+        non-positive prior equity level are dropped because return ratios are
+        not well-defined there.
+        """
+        if equity_series is None or len(equity_series) < 2:
+            return pd.Series(dtype=float)
+
+        equity_series = equity_series.dropna().sort_index()
+        if len(equity_series) < 2:
+            return pd.Series(dtype=float)
+
+        prev = equity_series.shift(1)
+        returns = (equity_series - prev) / prev
+        returns = returns.where(prev > 0.0)
+        returns = returns.replace([np.inf, -np.inf], np.nan).dropna()
+        returns.name = "period_return"
+        return returns
 
     # ------------------------------------------------------------------
     # VaR / ES
@@ -361,7 +388,7 @@ class RiskMetrics:
         매개변수
         ----------
         pnl_series : pd.Series
-            Cumulative PnL indexed by timestamp.
+            Equity / portfolio value indexed by timestamp.
         window : int
             Look-back window in periods.
         annualization_factor : int
@@ -379,7 +406,7 @@ class RiskMetrics:
                 index=pnl_series.index if pnl_series is not None else pd.DatetimeIndex([]),
             )
 
-        returns = pnl_series.diff().dropna()
+        returns = cls._compute_period_returns(pnl_series)
         sqrt_ann = np.sqrt(annualization_factor)
 
         rolling_mean = returns.rolling(window).mean()

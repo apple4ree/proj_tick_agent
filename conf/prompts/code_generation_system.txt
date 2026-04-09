@@ -23,6 +23,27 @@ $features_list
 - depth_imbalance_ema       : EMA of depth_imbalance_l1 (α=0.2). Persistent depth skew.
 - spread_bps_ema            : Slow EMA of spread_bps (α=0.1, ~10-tick baseline). Compare vs spread_bps.
 
+## Raw orderbook features (L1–L10)
+
+In addition to the summary features above, the following raw book features are available:
+- tick_size             : Instrument tick size (e.g. 5 for Samsung, 100 for KOSPI200 futures).
+- bid_1_price … bid_10_price  : Bid prices from L1 (best) to L10. Unit: KRW.
+- ask_1_price … ask_10_price  : Ask prices from L1 (best) to L10. Unit: KRW.
+- bid_1_volume … bid_10_volume : Bid quantities (shares) at each level.
+- ask_1_volume … ask_10_volume : Ask quantities (shares) at each level.
+
+Important rules for raw features:
+1. Deeper levels may not exist.  Always use `features.get(key, default)` — never index directly.
+   Example: `bid_5_vol = features.get("bid_5_volume", 0.0)`
+2. Never use raw prices as absolute thresholds (e.g. `if bid_1_price > 70000`).
+   Raw prices are NOT portable across symbols or time.  Instead compute relative expressions:
+   - spread in ticks : `spread_ticks = (features.get("ask_1_price", 0) - features.get("bid_1_price", 0)) / features.get("tick_size", 1.0)`
+   - price gap ratio : `(features.get("ask_2_price", 0) - features.get("ask_1_price", 0)) / features.get("tick_size", 1.0)`
+   - wall ratio      : `features.get("ask_1_volume", 1) / max(features.get("ask_2_volume", 1), 1)`
+   - L1-L3 imbalance : `(b1+b2+b3 - a1-a2-a3) / max(b1+b2+b3+a1+a2+a3, 1)`
+3. For spread_ticks-based constants use names matching *SPREAD*TICKS* or *TICKS*SPREAD*
+   so Optuna maps them to integer range [1, 10].
+
 ## Code interface
 
 You must produce Python code that defines:
@@ -39,9 +60,12 @@ Rules:
 - Use descriptive names that reflect their role (e.g. HOLDING_TICKS_EXIT, not X)
 - Optuna searches ranges based on the constant name pattern:
     - HOLDING*TICKS → integer, range [5, 120]
+    - *SPREAD*TICKS* (e.g. SPREAD_MAX_TICKS) → integer, range [1, 10]
+    - *TICKS*SPREAD* (e.g. TICKS_SPREAD_MAX) → integer, range [1, 10]
     - *IMBALANCE* or *EMA* → float, range [-0.9, 0.9]
     - *SPREAD*BPS* or *BPS*SPREAD* → float, range [1.0, 200.0]
     - *IMPACT*BPS* → float, range [0.5, 50.0]
+    - *RATIO* or *FACTOR* or *MULTIPLIER* → float, range [0.1, 5.0]
     - others → float, range [-5.0, 5.0]
 
 ### 2. generate_signal(features, position) -> int | None

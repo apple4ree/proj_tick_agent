@@ -7,7 +7,17 @@ if TYPE_CHECKING:
     from data.layer0_data.market_state import MarketState
 
 
+# Raw L1-L10 orderbook feature names (bid/ask × 10 levels × price/volume = 40 keys).
+# These are the *possible* keys; shallower books emit a subset at runtime.
+_RAW_BOOK_FEATURES: frozenset[str] = frozenset(
+    f"{side}_{i}_{attr}"
+    for side in ("bid", "ask")
+    for i in range(1, 11)
+    for attr in ("price", "volume")
+)
+
 BUILTIN_FEATURES: frozenset[str] = frozenset({
+    # ── summary / computed features ──────────────────────────────────────
     "mid_price", "spread_bps", "order_imbalance",
     "best_bid", "best_ask",
     "bid_depth_5", "ask_depth_5", "depth_imbalance",
@@ -17,15 +27,28 @@ BUILTIN_FEATURES: frozenset[str] = frozenset({
     "volume_surprise", "micro_price", "trade_flow",
     "depth_imbalance_l1", "log_bid_depth", "log_ask_depth",
     "bid_depth", "ask_depth",
-    # derived temporal features
+    # ── derived temporal features ─────────────────────────────────────────
     "order_imbalance_ema", "order_imbalance_delta",
     "trade_flow_imbalance_ema", "depth_imbalance_ema",
     "spread_bps_ema",
-})
+    # ── static instrument property ────────────────────────────────────────
+    "tick_size",
+}) | _RAW_BOOK_FEATURES
 
 
-def extract_builtin_features(state: "MarketState") -> dict[str, float]:
-    """Extract named features from MarketState for declarative rule evaluation."""
+def extract_builtin_features(
+    state: "MarketState",
+    *,
+    tick_size: float = 1.0,
+) -> dict[str, float]:
+    """Extract named features from MarketState for declarative rule evaluation.
+
+    Args:
+        state: Current MarketState.
+        tick_size: Instrument tick size injected as a static feature.  Defaults
+            to 1.0.  Pass the symbol-specific tick size so generated code can
+            compute spread_ticks = (ask_1_price - bid_1_price) / tick_size.
+    """
     features: dict[str, float] = {}
 
     lob = state.lob
@@ -73,5 +96,16 @@ def extract_builtin_features(state: "MarketState") -> dict[str, float]:
             n = len(sides)
             if n > 0:
                 features["trade_flow_imbalance"] = float(sides.sum() / n)
+
+    # Raw L1-L10 book features (only existing levels are added)
+    for i, lvl in enumerate(lob.bid_levels, start=1):
+        features[f"bid_{i}_price"] = float(lvl.price)
+        features[f"bid_{i}_volume"] = float(lvl.volume)
+    for i, lvl in enumerate(lob.ask_levels, start=1):
+        features[f"ask_{i}_price"] = float(lvl.price)
+        features[f"ask_{i}_volume"] = float(lvl.volume)
+
+    # tick_size: static instrument property injected each tick
+    features["tick_size"] = float(tick_size)
 
     return features

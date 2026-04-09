@@ -309,3 +309,239 @@ class TestMerge:
         merged = base.merge({"fee_model": "zero"})
         assert merged.initial_cash == 5e7
         assert merged.seed == 123
+
+
+# ---------------------------------------------------------------------------
+# tick_size enforcement (single source-of-truth policy)
+# ---------------------------------------------------------------------------
+
+class TestTickSizeEnforcement:
+    """tick_size == placement.tick_size invariant이 모든 경로에서 강제되는지 검증한다."""
+
+    _BASE = {"symbol": "005930", "start_date": "2026-03-13", "end_date": "2026-03-13"}
+
+    # ── A. 생성 경로 ──────────────────────────────────────────────────────
+
+    def test_top_level_only_syncs_placement(self):
+        """tick_size=5.0만 주면 placement.tick_size도 5.0이 된다."""
+        cfg = BacktestConfig(**self._BASE, tick_size=5.0)
+        assert cfg.tick_size == 5.0
+        assert cfg.placement.tick_size == 5.0
+
+    def test_placement_only_syncs_top_level(self):
+        """placement.tick_size=5.0만 주면 top-level tick_size도 5.0이 된다."""
+        cfg = BacktestConfig(
+            **self._BASE,
+            placement=PlacementConfig(style="passive", tick_size=5.0),
+        )
+        assert cfg.tick_size == 5.0
+        assert cfg.placement.tick_size == 5.0
+
+    def test_both_same_value_passes(self):
+        """둘 다 5.0이면 통과하고 invariant가 유지된다."""
+        cfg = BacktestConfig(
+            **self._BASE,
+            tick_size=5.0,
+            placement=PlacementConfig(style="passive", tick_size=5.0),
+        )
+        assert cfg.tick_size == 5.0
+        assert cfg.placement.tick_size == 5.0
+
+    def test_both_different_raises_value_error(self):
+        """tick_size=10.0, placement.tick_size=3.0이면 ValueError."""
+        with pytest.raises(ValueError, match="tick_size"):
+            BacktestConfig(
+                **self._BASE,
+                tick_size=10.0,
+                placement=PlacementConfig(style="passive", tick_size=3.0),
+            )
+
+    def test_default_both_remain_1(self):
+        """기본 생성 시 tick_size와 placement.tick_size 모두 1.0이다."""
+        cfg = BacktestConfig(**self._BASE)
+        assert cfg.tick_size == 1.0
+        assert cfg.placement.tick_size == 1.0
+
+    def test_top_level_syncs_placement_with_default(self):
+        """placement에 기본값(1.0)만 있으면 top-level이 canonical이 된다."""
+        cfg = BacktestConfig(
+            **self._BASE,
+            tick_size=10.0,
+            placement=PlacementConfig(style="passive"),   # tick_size=1.0 (default)
+        )
+        assert cfg.tick_size == 10.0
+        assert cfg.placement.tick_size == 10.0
+
+    def test_invariant_always_holds_after_construction(self):
+        """생성 후 항상 tick_size == placement.tick_size."""
+        for ts in (1.0, 5.0, 100.0):
+            cfg = BacktestConfig(**self._BASE, tick_size=ts)
+            assert cfg.tick_size == cfg.placement.tick_size, (
+                f"Invariant violated for tick_size={ts}"
+            )
+
+    # ── B. merge 경로 ─────────────────────────────────────────────────────
+
+    def test_merge_top_level_propagates_to_placement(self):
+        """top-level만 override하면 placement.tick_size도 따라간다."""
+        base = BacktestConfig(**self._BASE, tick_size=5.0)
+        merged = base.merge({"tick_size": 100.0})
+        assert merged.tick_size == 100.0
+        assert merged.placement.tick_size == 100.0
+
+    def test_merge_placement_tick_size_propagates_to_top_level(self):
+        """placement.tick_size만 override하면 top-level도 따라간다."""
+        base = BacktestConfig(**self._BASE, tick_size=5.0)
+        merged = base.merge({"placement": {"tick_size": 100.0}})
+        assert merged.tick_size == 100.0
+        assert merged.placement.tick_size == 100.0
+
+    def test_merge_both_same_passes(self):
+        """둘 다 같은 값으로 override하면 통과."""
+        base = BacktestConfig(**self._BASE, tick_size=5.0)
+        merged = base.merge({"tick_size": 10.0, "placement": {"tick_size": 10.0}})
+        assert merged.tick_size == 10.0
+        assert merged.placement.tick_size == 10.0
+
+    def test_merge_both_different_raises_value_error(self):
+        """둘 다 다르게 override하면 ValueError."""
+        base = BacktestConfig(**self._BASE, tick_size=5.0)
+        with pytest.raises(ValueError, match="tick_size"):
+            base.merge({"tick_size": 10.0, "placement": {"tick_size": 3.0}})
+
+    def test_merge_unrelated_preserves_tick_size(self):
+        """tick_size와 무관한 override 후에도 invariant 유지."""
+        base = BacktestConfig(**self._BASE, tick_size=5.0)
+        merged = base.merge({"fee_model": "zero"})
+        assert merged.tick_size == 5.0
+        assert merged.placement.tick_size == 5.0
+
+    # ── C. round-trip / from_dict 경로 ───────────────────────────────────
+
+    def test_round_trip_preserves_tick_size(self):
+        """to_dict → from_dict 후에도 tick_size == placement.tick_size."""
+        original = BacktestConfig(**self._BASE, tick_size=7.0)
+        restored = BacktestConfig.from_dict(original.to_dict())
+        assert restored.tick_size == 7.0
+        assert restored.placement.tick_size == 7.0
+
+    def test_from_dict_split_config_raises_value_error(self):
+        """from_dict에 top-level과 placement.tick_size가 다르게 주어지면 ValueError."""
+        d = {
+            **self._BASE,
+            "tick_size": 10.0,
+            "placement": {"style": "passive", "tick_size": 3.0},
+        }
+        with pytest.raises(ValueError, match="tick_size"):
+            BacktestConfig.from_dict(d)
+
+    def test_from_dict_top_level_only_syncs(self):
+        """from_dict에 top-level만 있으면 placement도 동기화된다."""
+        d = {**self._BASE, "tick_size": 5.0}
+        cfg = BacktestConfig.from_dict(d)
+        assert cfg.tick_size == 5.0
+        assert cfg.placement.tick_size == 5.0
+
+    def test_from_dict_placement_only_syncs_top_level(self):
+        """from_dict에 placement.tick_size만 있으면 top-level도 동기화된다."""
+        d = {
+            **self._BASE,
+            "placement": {"style": "passive", "tick_size": 5.0},
+        }
+        cfg = BacktestConfig.from_dict(d)
+        assert cfg.tick_size == 5.0
+        assert cfg.placement.tick_size == 5.0
+
+    def test_from_dict_both_same_passes(self):
+        """from_dict에 둘 다 같은 값이면 통과."""
+        d = {
+            **self._BASE,
+            "tick_size": 5.0,
+            "placement": {"style": "passive", "tick_size": 5.0},
+        }
+        cfg = BacktestConfig.from_dict(d)
+        assert cfg.tick_size == 5.0
+        assert cfg.placement.tick_size == 5.0
+
+    def test_from_dict_string_coercion(self):
+        """from_dict({"tick_size": "5.0", ...})가 float 5.0으로 복원된다."""
+        d = {**self._BASE, "tick_size": "5.0"}
+        cfg = BacktestConfig.from_dict(d)
+        assert cfg.tick_size == 5.0
+        assert isinstance(cfg.tick_size, float)
+
+    # ── D. to_dict 포함 확인 ──────────────────────────────────────────────
+
+    def test_to_dict_includes_tick_size(self):
+        """to_dict() 결과에 tick_size가 포함된다."""
+        cfg = BacktestConfig(**self._BASE, tick_size=5.0)
+        d = cfg.to_dict()
+        assert "tick_size" in d
+        assert d["tick_size"] == 5.0
+
+    def test_to_dict_placement_tick_size_consistent(self):
+        """to_dict()의 top-level tick_size와 placement.tick_size가 같다."""
+        cfg = BacktestConfig(**self._BASE, tick_size=5.0)
+        d = cfg.to_dict()
+        assert d["tick_size"] == d["placement"]["tick_size"]
+
+
+# ---------------------------------------------------------------------------
+# Residual fix tests: nested placement string coercion + ClassVar hygiene
+# ---------------------------------------------------------------------------
+
+class TestTickSizeResidualFixes:
+    """잔여 버그 수정 검증."""
+
+    _BASE = {"symbol": "005930", "start_date": "2026-03-13", "end_date": "2026-03-13"}
+
+    # ── 1. nested placement string coercion ───────────────────────────────
+
+    def test_nested_placement_string_tick_size_coerced_to_float(self):
+        """from_dict에서 placement.tick_size가 문자열로 들어와도 float로 정규화된다."""
+        d = {
+            **self._BASE,
+            "placement": {"style": "passive", "tick_size": "5.0"},
+        }
+        cfg = BacktestConfig.from_dict(d)
+        assert cfg.tick_size == 5.0
+        assert cfg.placement.tick_size == 5.0
+        assert isinstance(cfg.tick_size, float)
+        assert isinstance(cfg.placement.tick_size, float)
+
+    def test_both_string_same_value_coerced_and_passes(self):
+        """top-level과 placement 모두 같은 문자열로 들어와도 float로 정규화되고 통과한다."""
+        d = {
+            **self._BASE,
+            "tick_size": "5.0",
+            "placement": {"style": "passive", "tick_size": "5.0"},
+        }
+        cfg = BacktestConfig.from_dict(d)
+        assert cfg.tick_size == 5.0
+        assert cfg.placement.tick_size == 5.0
+        assert isinstance(cfg.tick_size, float)
+        assert isinstance(cfg.placement.tick_size, float)
+
+    def test_placement_config_from_dict_string_tick_size(self):
+        """PlacementConfig.from_dict에서 tick_size 문자열이 float로 변환된다."""
+        p = PlacementConfig.from_dict({"style": "passive", "tick_size": "5.0"})
+        assert p.tick_size == 5.0
+        assert isinstance(p.tick_size, float)
+
+    def test_tick_size_float_invariant_after_construction(self):
+        """생성 후 tick_size와 placement.tick_size 모두 반드시 float 타입이다."""
+        cfg = BacktestConfig(**self._BASE, tick_size=5.0)
+        assert isinstance(cfg.tick_size, float)
+        assert isinstance(cfg.placement.tick_size, float)
+
+    # ── 2. ClassVar hygiene ────────────────────────────────────────────────
+
+    def test_tick_size_default_not_in_dataclass_fields(self):
+        """`_TICK_SIZE_DEFAULT`는 __dataclass_fields__에 포함되지 않아야 한다."""
+        assert "_TICK_SIZE_DEFAULT" not in BacktestConfig.__dataclass_fields__
+
+    def test_tick_size_default_not_in_constructor_signature(self):
+        """`_TICK_SIZE_DEFAULT`는 BacktestConfig 생성자 파라미터에 없어야 한다."""
+        import inspect
+        sig = inspect.signature(BacktestConfig)
+        assert "_TICK_SIZE_DEFAULT" not in sig.parameters

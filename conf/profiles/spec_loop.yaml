@@ -1,0 +1,82 @@
+# ==============================================
+# Spec Loop 프로필 — Planner → Spec → Implementer → 백테스트 루프
+# ==============================================
+#
+# 사용법:
+#   scripts/run_spec_loop_live.sh   (live 실행)
+#
+# 주요 설정 그룹:
+#   app             — 로깅 수준
+#   backtest        — 백테스트 시뮬레이터 파라미터
+#   spec_loop       — Spec-Centric 생성 루프 전용 설정
+#   optimization    — Optuna 최적화 설정
+
+app:
+  env: prod
+  log_level: INFO
+
+backtest:
+  initial_cash: 100000000   # KRW (1억)
+  seed: 42
+  resample: "1s"
+  trade_lookback: 100
+  latency_ms: 100.0
+  fee_model: krx
+  slicing_algo: TWAP
+  placement_style: spread_adaptive
+  exchange_model: partial_fill
+  queue_model: prob_queue
+  queue_position_assumption: 0.5
+  market_data_delay_ms: 0.0
+  decision_compute_ms: 0.0
+  compute_attribution: false  # code loop에서는 attribution 불필요
+
+# ── Spec-Centric 생성 루프 전용 설정 ──────────────────────
+spec_loop:
+  # LLM 설정
+  model: gpt-4o           # 비용 효율적 기본값. 품질 우선이면 gpt-4o
+
+  # 루프 제어
+  max_plan_iterations: 10    # 외부 루프 (플랜 제안 횟수)
+  max_code_attempts: 3       # 내부 루프 (동일 spec으로 코드 재시도)
+  precode_eval_threshold: 0.50
+
+  # 탐색 목표 (기본값 — .sh에서 GOAL=... 로 override 가능)
+  research_goal: "Use raw L1-L10 orderbook features, but emphasize L1-L3 or distance-weighted near-book depth. Find long-only continuation entries only when near-book bid depth clearly exceeds ask depth, recent imbalance is improving, spread is tight, and expected entry cost is low. Prefer high-threshold, low-frequency signals with one position at a time and cooldown between entries. Use explicit maximum holding time exits and feature-based reversal exits when top-level bid support decays, imbalance deteriorates, or ask pressure begins to dominate."
+
+  # 심볼 (쉼표 구분, 복수 심볼 가능 — 각 심볼마다 독립 백테스트 후 결과 aggregate)
+  # 예) "000660" / "000660,005930" / "000660,005930,005380"
+  symbols: "000660,005930,005380"
+
+  # IS / OOS 날짜 (YYYYMMDD, .sh에서 IS_START=, IS_END=, OOS_START=, OOS_END= 로 override 가능)
+  # OOS를 쓰지 않으려면 oos_start / oos_end 를 빈 문자열로 두면 된다.
+  is_start: "20260316"
+  is_end: "20260320"
+  oos_start: "20260323"
+  oos_end: "20260327"
+
+# ── Optuna 최적화 설정 ────────────────────────────────────
+optimization:
+  n_trials: 30                  # Optuna 탐색 횟수 (smoke: 5, prod: 30)
+  lambda_mdd: 1.0
+  stage_prefixes: [0.2, 0.5, 1.0]
+  enable_pruning: true
+  #
+  # 탐색 범위 주석 (threshold_optimizer.py _CODE_CONST_RANGES 참조):
+  #   HOLDING*TICKS  → int   [5, 120]
+  #   *IMBALANCE*    → float [-0.9, 0.9]
+  #   *SPREAD*BPS*   → float [1.0, 200.0]
+  #   *IMPACT*BPS*   → float [0.5, 50.0]
+  #   others         → float [-5.0, 5.0]
+
+# ── 분포 필터 설정 ────────────────────────────────────────
+distribution_filter:
+  # 진입 빈도 허용 범위 (distribution_filter.py 기본값과 동일)
+  min_entry_freq: 0.001         # 0.1% — 이 이하면 진입 조건이 너무 희귀
+  max_entry_freq: 0.50          # 50%  — 이 이상이면 거의 항상 진입
+  sample_size: 2000             # 판정에 사용할 상태 수
+
+# ── V1 RAG 메모리 설정 ───────────────────────────────────
+rag_memory:
+  max_failures: 5               # 프롬프트에 주입할 최근 실패 최대 수
+  max_successes: 3              # 프롬프트에 주입할 최근 성공 최대 수

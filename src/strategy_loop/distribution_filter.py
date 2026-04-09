@@ -47,6 +47,8 @@ def check_code_entry_frequency(
     sample_size: int = SAMPLE_SIZE,
     min_freq: float = MIN_ENTRY_FREQ,
     max_freq: float = MAX_ENTRY_FREQ,
+    *,
+    tick_size: float = 1.0,
 ) -> FilterResult:
     """Python 코드 전략의 진입 빈도를 샘플로 검증한다.
 
@@ -59,6 +61,9 @@ def check_code_entry_frequency(
         sample_size: 샘플 크기 (첫 N개 상태)
         min_freq: 최소 허용 빈도 (inclusive)
         max_freq: 최대 허용 빈도 (inclusive)
+        tick_size: 종목 틱 크기 (feature dict에 주입). 실제 백테스트와 동일한
+            feature contract를 보장하기 위해 backtest_config.tick_size와 같은
+            값을 전달한다. 기본값 1.0.
 
     Returns:
         FilterResult — passed=False면 DistributionFilterError를 raise할 것
@@ -92,7 +97,7 @@ def check_code_entry_frequency(
 
     n_signals = 0
     for idx, s in enumerate(sample):
-        features = extract_builtin_features(s)
+        features = extract_builtin_features(s, tick_size=tick_size)
         try:
             result = generate_signal(features, dict(base_position))
         except Exception as exc:

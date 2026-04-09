@@ -141,6 +141,7 @@ def build_config(args: argparse.Namespace, bt_cfg: dict | None = None) -> Backte
         market_data_delay_ms=float(bt.get("market_data_delay_ms", 0.0)),
         decision_compute_ms=float(bt.get("decision_compute_ms", 0.0)),
         compute_attribution=bt.get("compute_attribution", True),
+        tick_size=float(bt.get("tick_size", 1.0)),
     )
 
 
@@ -149,11 +150,11 @@ def _load_code(path: str) -> str:
     return Path(path).read_text(encoding="utf-8")
 
 
-def _build_strategy(args: argparse.Namespace) -> Strategy:
+def _build_strategy(args: argparse.Namespace, tick_size: float = 1.0) -> Strategy:
     """Build a CodeStrategy from a Python file."""
     code = _load_code(args.code_file)
     strategy_name = Path(args.code_file).stem or "code_strategy"
-    return CodeStrategy(code=code, name=strategy_name)
+    return CodeStrategy(code=code, name=strategy_name, tick_size=tick_size)
 
 
 def run_backtest(args: argparse.Namespace, cfg: dict | None = None) -> BacktestResult:
@@ -163,7 +164,7 @@ def run_backtest(args: argparse.Namespace, cfg: dict | None = None) -> BacktestR
     paths = get_paths(cfg)
     bt = get_backtest(cfg)
     config = build_config(args, bt)
-    strategy = _build_strategy(args)
+    strategy = _build_strategy(args, tick_size=config.tick_size)
 
     data_dir = paths["data_dir"]
     resample = bt.get("resample", "1s")
@@ -224,6 +225,7 @@ def backtest_config_from_cfg(
         "market_data_delay_ms": float(bt.get("market_data_delay_ms", 0.0)),
         "decision_compute_ms": float(bt.get("decision_compute_ms", 0.0)),
         "compute_attribution": bt.get("compute_attribution", True),
+        "tick_size": float(bt.get("tick_size", 1.0)),
     }
     base.update(overrides)
     return BacktestConfig(**base)
@@ -315,7 +317,7 @@ def main() -> None:
         trade_lookback=lookback,
     )
 
-    strategy = _build_strategy(args)
+    strategy = _build_strategy(args, tick_size=config.tick_size)
 
     runner = PipelineRunner(
         config=config,

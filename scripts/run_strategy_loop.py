@@ -4,19 +4,19 @@
 사용법:
     cd /home/dgu/tick/proj_rl_agent
 
-    # mock 모드 (LLM 없이 테스트, OOS 없음)
-    PYTHONPATH=src python scripts/run_strategy_loop.py \\
+    # IS only (실제 OpenAI 사용)
+    OPENAI_API_KEY=sk-... PYTHONPATH=src python scripts/run_strategy_loop.py \\
         --research-goal "order imbalance momentum" \\
         --symbol 005930 --is-start 20260313 --is-end 20260313 \\
-        --mode mock --n-iter 3
+        --n-iter 3
 
-    # IS/OOS 분리 (실제 OpenAI 사용)
+    # IS/OOS 분리
     OPENAI_API_KEY=sk-... PYTHONPATH=src python scripts/run_strategy_loop.py \\
         --research-goal "spread mean reversion" \\
         --symbol 005930 \\
         --is-start 20260313 --is-end 20260319 \\
         --oos-start 20260320 --oos-end 20260326 \\
-        --mode live --model gpt-4o-mini --n-iter 10
+        --model gpt-4o-mini --n-iter 10
 """
 from __future__ import annotations
 
@@ -52,10 +52,21 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--oos-start", default=None, help="Out-of-sample start date YYYYMMDD (omit for no OOS check)")
     p.add_argument("--oos-end", default=None, help="Out-of-sample end date YYYYMMDD")
     p.add_argument("--n-iter", type=int, default=5, help="Max number of loop iterations (default: 5)")
+    p.add_argument(
+        "--strategy-mode",
+        choices=["code", "spec"],
+        default="code",
+        help="Strategy generation mode: 'code' (default) or 'spec' (planner→spec→implementer)",
+    )
+    p.add_argument("--max-plan-iterations", type=int, default=None,
+                   help="[spec mode] Max plan proposals (default: from profile or 10)")
+    p.add_argument("--max-code-attempts", type=int, default=None,
+                   help="[spec mode] Max code attempts per plan (default: from profile or 3)")
+    p.add_argument("--precode-eval-threshold", type=float, default=None,
+                   help="[spec mode] Minimum precode_eval score to proceed (default: 0.50)")
     p.add_argument("--optimize-n-trials", type=int, default=20,
                    help="Optuna threshold optimization trials per iteration (0 = disabled, default: 20)")
-    p.add_argument("--mode", choices=["live", "mock"], default="mock", help="LLM mode (default: mock)")
-    p.add_argument("--model", default="gpt-4o", help="OpenAI model name (live mode only)")
+    p.add_argument("--model", default="gpt-4o", help="OpenAI model name")
     p.add_argument("--memory-dir", default=None, help="Directory for memory storage (default: outputs/memory)")
     p.add_argument("--output-dir", default=None, help="Directory for backtest artifacts (default: outputs/backtests)")
     p.add_argument("--config", default=None, help="Optional YAML config override path")
@@ -80,7 +91,7 @@ def main() -> None:
     memory_dir = args.memory_dir or (outputs_dir + "/memory")
     output_dir = args.output_dir or (outputs_dir + "/backtests")
 
-    client = OpenAIClient(model=args.model, mode=args.mode)
+    client = OpenAIClient(model=args.model)
     runner = LoopRunner(
         client=client,
         memory_dir=memory_dir,
@@ -110,17 +121,33 @@ def main() -> None:
     print("=" * 72)
     print(f"Strategy Loop | goal='{args.research_goal}' | symbols={','.join(symbols)}")
     print(f"  IS={date_ranges.is_start}..{date_ranges.is_end}{oos_str}")
-    print(f"  llm_mode={args.mode} | strategy_mode=code | n_iter={args.n_iter}")
+    print(f"  model={args.model} | strategy_mode={args.strategy_mode} | n_iter={args.n_iter}")
     print("=" * 72)
 
-    result = runner.run(
-        research_goal=args.research_goal,
-        n_iterations=args.n_iter,
-        data_dir=data_dir,
-        symbols=symbols,
-        date_ranges=date_ranges,
-        cfg=cfg,
-    )
+    if args.strategy_mode == "spec":
+        spec_cfg = cfg.get("spec_loop", {})
+        max_plan_iter = args.max_plan_iterations or spec_cfg.get("max_plan_iterations", 10)
+        max_code_att = args.max_code_attempts or spec_cfg.get("max_code_attempts", 3)
+        precode_thr = args.precode_eval_threshold or spec_cfg.get("precode_eval_threshold", 0.50)
+        result = runner.run_spec_centric(
+            research_goal=args.research_goal,
+            max_plan_iterations=max_plan_iter,
+            max_code_attempts=max_code_att,
+            data_dir=data_dir,
+            symbols=symbols,
+            date_ranges=date_ranges,
+            cfg=cfg,
+            precode_eval_threshold=precode_thr,
+        )
+    else:
+        result = runner.run(
+            research_goal=args.research_goal,
+            n_iterations=args.n_iter,
+            data_dir=data_dir,
+            symbols=symbols,
+            date_ranges=date_ranges,
+            cfg=cfg,
+        )
 
     print("\n─── Loop Summary ─────────────────────────────────────────────")
     print(f"  Final verdict : {result.verdict}")

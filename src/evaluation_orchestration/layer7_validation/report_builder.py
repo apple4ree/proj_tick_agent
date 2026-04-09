@@ -49,20 +49,27 @@ class ReportBuilder:
 
         pnl_report = self._pnl_ledger.generate_report()
 
-        cum_pnl = self._pnl_ledger.cumulative_pnl_series()
+        if portfolio_values:
+            ts, vals = zip(*portfolio_values)
+            pv_series = pd.Series(vals, index=pd.DatetimeIndex(ts), dtype=float)
+        else:
+            cum_pnl = self._pnl_ledger.cumulative_pnl_series()
+            if len(cum_pnl) > 0:
+                pv_series = cum_pnl + float(self._config.initial_cash)
+                pv_series.name = "portfolio_value"
+            else:
+                pv_series = pd.Series(dtype=float, name="portfolio_value")
+
+        # Risk metrics, especially MDD, must be computed on equity / portfolio
+        # value levels rather than raw cumulative PnL. Using PnL directly can
+        # distort drawdown toward ~100% whenever the series crosses below zero.
         risk_report = RiskMetrics.compute(
-            pnl_series=cum_pnl,
+            pnl_series=pv_series,
             freq="tick",
             annualization_factor=self._config.annualization_factor,
         )
 
         exec_report = ExecutionMetrics.compute(fills, parent_orders, states)
-
-        if portfolio_values:
-            ts, vals = zip(*portfolio_values)
-            pv_series = pd.Series(vals, index=pd.DatetimeIndex(ts))
-        else:
-            pv_series = pd.Series(dtype=float)
 
         turnover_report = TurnoverMetrics.compute(
             fills=fills,
@@ -132,6 +139,7 @@ class ReportBuilder:
 
         self._write_runtime_artifacts(result, run_dir)
         self._generate_plots(run_dir)
+        self._generate_html_report(run_dir)
         logger.info("Results saved to %s", run_dir)
 
     def save_runtime_artifacts(
@@ -242,6 +250,16 @@ class ReportBuilder:
             "mid_price": mid_prices,
         }).to_csv(run_dir / "market_quotes.csv", index=False)
         logger.info("Saved %d market quote snapshots", len(states))
+
+    @staticmethod
+    def _generate_html_report(run_dir: Path) -> None:
+        try:
+            from evaluation_orchestration.layer7_validation.html_report import generate_html_report
+            path = generate_html_report(run_dir)
+            if path:
+                logger.info("Generated HTML report: %s", path)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("HTML report generation skipped: %s", exc)
 
     @staticmethod
     def _generate_plots(run_dir: Path) -> None:

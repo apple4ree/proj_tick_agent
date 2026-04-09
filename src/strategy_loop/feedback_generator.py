@@ -8,14 +8,18 @@ from strategy_loop.feedback_controller import (
     compute_controller_decision,
     compute_derived_metrics,
 )
-from strategy_loop.openai_client import OpenAIClient
 from strategy_loop.prompt_builder import build_code_feedback_messages
 
 logger = logging.getLogger(__name__)
 
 
 class FeedbackGenerator:
-    def __init__(self, client: OpenAIClient) -> None:
+    def __init__(self, client: Any) -> None:
+        """
+        Args:
+            client: Any object with a chat_json(messages, context=...) method.
+                    In production, use OpenAIClient. In tests, inject FakeLLMClient.
+        """
         self._client = client
 
     def generate(

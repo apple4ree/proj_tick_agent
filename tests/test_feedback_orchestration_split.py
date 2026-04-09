@@ -271,7 +271,7 @@ def test_loop_runner_uses_controller_verdict_and_control_mode(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    def _fake_backtest(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    def _fake_backtest(*args: Any, **kwargs: Any) -> tuple[dict[str, Any], list]:
         return _summary(
             signal_count=0,
             n_fills=0,
@@ -282,7 +282,7 @@ def test_loop_runner_uses_controller_verdict_and_control_mode(
             total_commission=0.0,
             total_slippage=0.0,
             total_impact=0.0,
-        )
+        ), []
 
     monkeypatch.setattr(LoopRunner, "_run_backtest_multi_code", _fake_backtest)
 

@@ -26,9 +26,14 @@ from strategy_loop.distribution_filter import (
 from strategy_loop.feedback_generator import FeedbackGenerator
 from strategy_loop.goal_decomposer import decompose as decompose_goal
 from strategy_loop.hard_gate import HardGateResult, validate_code
+from strategy_loop.implementer_prompt_builder import build_implementer_messages
 from strategy_loop.memory_store import MemoryStore
 from strategy_loop.openai_client import OpenAIClient
+from strategy_loop.planner_prompt_builder import build_planner_messages, parse_planner_response
+from strategy_loop.precode_eval import evaluate_spec
 from strategy_loop.prompt_builder import build_code_generation_messages
+from strategy_loop.spec_review import review_spec
+from strategy_loop.spec_schema import StrategySpec
 from strategy_loop.threshold_optimizer import optimize_code_thresholds
 
 logger = logging.getLogger(__name__)
@@ -185,7 +190,7 @@ class LoopRunner:
 
             # 3) Backtest IS
             try:
-                bt_summary = self._run_backtest_multi_code(
+                bt_summary, _is_run_dirs = self._run_backtest_multi_code(
                     code=code,
                     strategy_name=strategy_name,
                     data_dir=data_dir,
@@ -250,6 +255,9 @@ class LoopRunner:
             rec.feedback = feedback
             logger.info("Feedback verdict: %s", feedback["verdict"])
 
+            for _rd in _is_run_dirs:
+                _write_strategy_info(_rd, code=code, feedback=feedback, strategy_text=None, iteration=i + 1)
+
             # 5) Save to memory
             self._memory.save_strategy(run_id, strategy_name, code, bt_summary, feedback)
             if feedback.get("suggestions"):
@@ -313,7 +321,7 @@ class LoopRunner:
                     logger.info("IS passed. Running OOS validation (%s ~ %s)...",
                                 date_ranges.oos_start, date_ranges.oos_end)
                     try:
-                        oos_summary = self._run_backtest_multi_code(
+                        oos_summary, _ = self._run_backtest_multi_code(
                             code=code,
                             strategy_name=strategy_name,
                             data_dir=data_dir,
@@ -380,6 +388,481 @@ class LoopRunner:
                     result.verdict = "pass"
                     logger.info("Strategy passed (no OOS configured). Stopping loop.")
                     break
+
+        return result
+
+    def run_spec_centric(
+        self,
+        research_goal: str,
+        max_plan_iterations: int,
+        max_code_attempts: int,
+        data_dir: str | Path,
+        symbols: list[str],
+        date_ranges: DateRanges,
+        cfg: dict[str, Any] | None = None,
+        precode_eval_threshold: float = 0.50,
+    ) -> LoopResult:
+        """Spec-centric pipeline: planner → spec_review → precode_eval → implementer.
+
+        Outer loop iterates over plan proposals (up to max_plan_iterations);
+        inner loop retries code generation for a fixed spec (up to max_code_attempts).
+
+        Routing rules:
+          - spec_review invalid               → skip plan (no code attempts)
+          - precode_eval.overall < threshold  → skip plan (no code attempts)
+          - structural feedback (structural_change_required=True,
+            severity=="structural", or diagnosis_code in
+            {oos_fail, oos_distribution_filter})
+                                              → break inner loop immediately;
+                                                plan_outcome="structural_fail"
+          - parametric feedback (no_trades, repair)
+                                              → stay in inner loop (retry code)
+          - code_attempt >= max_code_attempts → exit inner loop, request new plan
+          - IS pass + no OOS configured       → return (verdict="pass")
+          - IS pass + OOS pass                → return (verdict="pass")
+          - IS pass + OOS fail                → structural routing (see above)
+        """
+        result = LoopResult()
+        overall_iteration = 0   # monotone counter across all plans/attempts
+
+        rag_cfg = (cfg or {}).get("rag_memory", {})
+        max_failures = max(1, int(rag_cfg.get("max_failures", 5)))
+        max_successes = max(1, int(rag_cfg.get("max_successes", 3)))
+        rag_memory = RagMemoryV1(max_failures=max_failures, max_successes=max_successes)
+
+        goal_decomp = decompose_goal(research_goal)
+        logger.info(
+            "Goal decomposition: archetype=%s (%s), features=%s",
+            goal_decomp.archetype,
+            goal_decomp.archetype_name,
+            goal_decomp.suggested_features,
+        )
+
+        previous_plan_feedback: str | None = None
+
+        for plan_iter in range(max_plan_iterations):
+            plan_id = str(uuid.uuid4())[:8]
+            logger.info(
+                "═══ Plan iteration %d / %d  (plan_id=%s) ═══",
+                plan_iter + 1, max_plan_iterations, plan_id,
+            )
+
+            # ── Stage 1: Planner LLM ─────────────────────────────────
+            planner_memory = self._memory.load_planner_memory()
+            planner_msgs = build_planner_messages(
+                research_goal=research_goal,
+                goal_decomposition=goal_decomp,
+                planner_memory=planner_memory,
+                previous_plan_feedback=previous_plan_feedback,
+            )
+            try:
+                planner_response = self._client.chat_json(
+                    planner_msgs, context="planner"
+                )
+                strategy_text, spec_raw = parse_planner_response(planner_response)
+                spec = StrategySpec.from_dict(spec_raw)
+            except Exception as exc:
+                logger.error("Planner LLM failed: %s", exc)
+                previous_plan_feedback = f"Planner call failed: {exc}"
+                continue
+
+            logger.info(
+                "  Planner: archetype=%s (%s), entry_conds=%d, derived=%d, params=%d",
+                spec.archetype, spec.archetype_name,
+                len(spec.entry_conditions), len(spec.derived_features),
+                len(spec.tunable_params),
+            )
+
+            # ── Stage 2: Spec review ─────────────────────────────────
+            review = review_spec(spec)
+            if not review.valid:
+                logger.warning(
+                    "  Spec review failed: %s", review.errors
+                )
+                previous_plan_feedback = (
+                    "Spec review failed — fix these errors before proceeding:\n"
+                    + "\n".join(f"  - {e}" for e in review.errors)
+                )
+                self._memory.save_plan(
+                    plan_id=plan_id,
+                    strategy_text=strategy_text,
+                    spec=spec.to_dict(),
+                    spec_review=review.to_dict(),
+                    precode_eval={"version": "1", "go": False, "overall": 0.0,
+                                  "scores": {}, "notes": review.errors},
+                    outcome="spec_invalid",
+                    primary_issue="; ".join(review.errors),
+                )
+                continue
+
+            # normalized_spec is the canonical implementer input from here on
+            normalized_spec = review.normalized_spec
+
+            # ── Stage 3: Pre-code evaluation ─────────────────────────
+            pce = evaluate_spec(normalized_spec)
+            logger.info(
+                "  PrecodeEval: overall=%.2f, go=%s, notes=%s",
+                pce.overall, pce.go, pce.notes,
+            )
+
+            # Save plan record (outcome will be updated after inner loop)
+            self._memory.save_plan(
+                plan_id=plan_id,
+                strategy_text=strategy_text,
+                spec=spec.to_dict(),
+                spec_review=review.to_dict(),
+                precode_eval=pce.to_dict(),
+            )
+
+            if not pce.go or pce.overall < precode_eval_threshold:
+                previous_plan_feedback = (
+                    f"Pre-code eval score {pce.overall:.2f} < threshold {precode_eval_threshold}. "
+                    "Improve these dimensions:\n"
+                    + "\n".join(f"  - {n}" for n in pce.notes)
+                )
+                self._memory.update_plan_outcome(
+                    plan_id=plan_id,
+                    outcome="precode_rejected",
+                    primary_issue=previous_plan_feedback,
+                )
+                continue
+
+            # ── Stage 4: Inner code loop ──────────────────────────────
+            code_attempts: list[dict[str, Any]] = []
+            best_code_for_plan: str | None = None
+            best_net_pnl_for_plan: float = -float("inf")
+            previous_code_feedback: dict[str, Any] | None = None
+            consecutive_code_fails: int = 0
+            plan_outcome = "no_code_pass"
+
+            for code_attempt in range(max_code_attempts):
+                overall_iteration += 1
+                run_id = str(uuid.uuid4())[:8]
+                strategy_name = f"spec_v{plan_iter + 1}_code_v{code_attempt + 1}"
+                logger.info(
+                    "  ─ Code attempt %d / %d  (run_id=%s)",
+                    code_attempt + 1, max_code_attempts, run_id,
+                )
+
+                # 4a) Build implementer messages from normalized_spec
+                insights = self._memory.load_insights()
+                failure_patterns = self._memory.load_failure_patterns()
+                rag_ctx = rag_memory.format_for_prompt()
+                messages = build_implementer_messages(
+                    spec=normalized_spec,
+                    session_attempts=code_attempts,
+                    previous_feedback=previous_code_feedback,
+                    best_code_so_far=best_code_for_plan,
+                    stuck_count=consecutive_code_fails,
+                    rag_context=rag_ctx,
+                )
+
+                try:
+                    code = self._client.chat_code(messages)
+                except Exception as exc:
+                    logger.error("Implementer LLM failed: %s", exc)
+                    rec = IterationRecord(
+                        iteration=overall_iteration,
+                        run_id=run_id,
+                        strategy_name=strategy_name,
+                        code=None,
+                        gate_result=HardGateResult(passed=False, errors=[str(exc)]),
+                        skipped=True,
+                        skip_reason="llm_error",
+                    )
+                    result.iterations.append(rec)
+                    consecutive_code_fails += 1
+                    continue
+
+                # 4b) Hard gate
+                gate = validate_code(code)
+                rec = IterationRecord(
+                    iteration=overall_iteration,
+                    run_id=run_id,
+                    strategy_name=strategy_name,
+                    code=code,
+                    gate_result=gate,
+                )
+                if not gate.passed:
+                    logger.warning("  Code hard gate failed: %s", gate.errors)
+                    rec.skipped = True
+                    rec.skip_reason = "hard_gate_fail"
+                    result.iterations.append(rec)
+                    consecutive_code_fails += 1
+                    continue
+
+                # 4c) Optuna optimization
+                if self._optimize_n_trials > 0:
+                    code = self._optimize_code(
+                        code=code,
+                        data_dir=data_dir,
+                        symbol=symbols[0],
+                        start_date=date_ranges.is_start,
+                        end_date=date_ranges.is_end,
+                        cfg=cfg,
+                    )
+                    rec.code = code
+
+                # 4d) Backtest IS
+                try:
+                    bt_summary, _is_run_dirs = self._run_backtest_multi_code(
+                        code=code,
+                        strategy_name=strategy_name,
+                        data_dir=data_dir,
+                        symbols=symbols,
+                        start_date=date_ranges.is_start,
+                        end_date=date_ranges.is_end,
+                        cfg=cfg,
+                    )
+                except DistributionFilterError as exc:
+                    logger.warning("  Distribution filter rejected code: %s", exc.reason)
+                    rec.skipped = True
+                    rec.skip_reason = f"dist_filter: {exc.reason}"
+                    code_attempts.append({
+                        "iteration": code_attempt + 1,
+                        "strategy_name": strategy_name,
+                        "entry_frequency": exc.entry_frequency,
+                        "net_pnl": 0.0,
+                        "n_fills": 0.0,
+                        "verdict": "dist_filter",
+                        "primary_issue": exc.reason,
+                    })
+                    previous_code_feedback = {
+                        "verdict": "retry",
+                        "diagnosis_code": "distribution_filter",
+                        "severity": "parametric",
+                        "control_mode": "repair",
+                        "primary_issue": exc.reason,
+                        "structural_change_required": False,
+                        "controller_reasons": [exc.reason],
+                        "suggestions": [
+                            "Adjust UPPER_CASE threshold constants so generate_signal returns 1 "
+                            "between 0.1% and 50% of states.",
+                        ],
+                        "issues": [],
+                    }
+                    consecutive_code_fails += 1
+                    result.iterations.append(rec)
+                    continue
+                except Exception as exc:
+                    logger.error("  Code backtest failed: %s", exc)
+                    rec.skipped = True
+                    rec.skip_reason = f"backtest_error: {exc}"
+                    result.iterations.append(rec)
+                    consecutive_code_fails += 1
+                    continue
+
+                rec.backtest_summary = bt_summary
+
+                # 4e) LLM Feedback
+                feedback = self._feedback_gen.generate(
+                    code=code,
+                    backtest_summary=bt_summary,
+                    memory_insights=insights,
+                )
+                rec.feedback = feedback
+                logger.info("  Feedback verdict: %s", feedback["verdict"])
+
+                for _rd in _is_run_dirs:
+                    _write_strategy_info(_rd, code=code, feedback=feedback, strategy_text=strategy_text, iteration=plan_iter + 1)
+
+                # 4f) Save to memory
+                self._memory.save_strategy(
+                    run_id, strategy_name, code, bt_summary, feedback
+                )
+                if feedback.get("suggestions"):
+                    self._memory.append_insights(feedback["suggestions"])
+                if feedback.get("issues"):
+                    self._memory.append_failure_patterns(feedback["issues"])
+
+                net_pnl_for_rag = bt_summary.get("net_pnl") or 0.0
+                derived = feedback.get("derived_metrics") or {}
+                entry_freq_for_rag = derived.get("entry_frequency")
+                if not isinstance(entry_freq_for_rag, (int, float)):
+                    sig_count = bt_summary.get("signal_count") or 0.0
+                    n_st = bt_summary.get("n_states") or 1.0
+                    entry_freq_for_rag = sig_count / n_st
+                rag_memory.add(CodeKnowledge(
+                    task_name=strategy_name,
+                    code=code,
+                    verdict=feedback["verdict"],
+                    diagnosis_code=str(feedback.get("diagnosis_code", "")),
+                    net_pnl=net_pnl_for_rag,
+                    entry_frequency=float(entry_freq_for_rag),
+                    primary_issue=feedback.get("primary_issue", ""),
+                    suggestions=feedback.get("suggestions", []),
+                ))
+
+                # 4g) Update code-attempt tracking
+                net_pnl = bt_summary.get("net_pnl") or 0.0
+                sig_count = bt_summary.get("signal_count") or 0.0
+                n_states = bt_summary.get("n_states") or 1.0
+                entry_freq = derived.get("entry_frequency", sig_count / n_states)
+                if not isinstance(entry_freq, (int, float)):
+                    entry_freq = sig_count / n_states
+
+                code_attempts.append({
+                    "iteration": code_attempt + 1,
+                    "strategy_name": strategy_name,
+                    "entry_frequency": float(entry_freq),
+                    "net_pnl": net_pnl,
+                    "n_fills": bt_summary.get("n_fills") or 0.0,
+                    "verdict": feedback["verdict"],
+                    "primary_issue": feedback.get("primary_issue", ""),
+                })
+
+                if net_pnl > best_net_pnl_for_plan:
+                    best_net_pnl_for_plan = net_pnl
+                    best_code_for_plan = code if net_pnl > 0 else None
+
+                if feedback["verdict"] != "pass":
+                    consecutive_code_fails += 1
+                else:
+                    consecutive_code_fails = 0
+
+                previous_code_feedback = feedback
+                result.iterations.append(rec)
+
+                # 4h) Structural-failure check — exit inner loop immediately
+                _STRUCTURAL_DIAG = frozenset({"oos_fail", "oos_distribution_filter"})
+                _is_structural = (
+                    feedback.get("structural_change_required") is True
+                    or feedback.get("severity") == "structural"
+                    or feedback.get("diagnosis_code") in _STRUCTURAL_DIAG
+                )
+                if _is_structural and feedback["verdict"] != "pass":
+                    logger.warning(
+                        "  Structural failure (%s) — abandoning this spec, requesting new plan.",
+                        feedback.get("diagnosis_code", "?"),
+                    )
+                    plan_outcome = "structural_fail"
+                    previous_plan_feedback = (
+                        f"Structural failure: {feedback.get('primary_issue', feedback.get('diagnosis_code', ''))}"
+                        " — design a different strategy (different archetype or features)."
+                    )
+                    self._memory.update_plan_outcome(
+                        plan_id,
+                        outcome="structural_fail",
+                        primary_issue=previous_plan_feedback,
+                        best_net_pnl=max(best_net_pnl_for_plan, 0.0),
+                    )
+                    break   # exit inner code loop; outer plan loop will continue
+
+                # 4i) Check stop / OOS
+                if feedback["verdict"] == "pass":
+                    if date_ranges.has_oos:
+                        logger.info(
+                            "  IS passed. Running OOS (%s ~ %s)...",
+                            date_ranges.oos_start, date_ranges.oos_end,
+                        )
+                        try:
+                            oos_summary, _ = self._run_backtest_multi_code(
+                                code=code,
+                                strategy_name=strategy_name,
+                                data_dir=data_dir,
+                                symbols=symbols,
+                                start_date=date_ranges.oos_start,
+                                end_date=date_ranges.oos_end,
+                                cfg=cfg,
+                            )
+                            result.oos_backtest_summary = oos_summary
+                            oos_net_pnl = oos_summary.get("net_pnl", 0.0) or 0.0
+                            if oos_net_pnl > 0:
+                                result.oos_verdict = "pass_oos"
+                                result.best_run_id = run_id
+                                result.verdict = "pass"
+                                plan_outcome = "pass"
+                                logger.info(
+                                    "  OOS also passed (net_pnl=%.1f). Stopping.", oos_net_pnl
+                                )
+                                self._memory.update_plan_outcome(
+                                    plan_id, outcome="pass",
+                                    best_net_pnl=oos_net_pnl,
+                                )
+                                break
+
+                            # OOS fail → structural: exit inner loop, request new plan
+                            result.oos_verdict = "fail_oos"
+                            logger.warning(
+                                "  OOS failed (net_pnl=%.1f). Requesting new plan.", oos_net_pnl
+                            )
+                            plan_outcome = "structural_fail"
+                            previous_plan_feedback = (
+                                f"IS passed but OOS failed (oos_net_pnl={oos_net_pnl:.0f}). "
+                                "Strategy is overfit to IS period. "
+                                "Design a more robust strategy."
+                            )
+                            self._memory.update_plan_outcome(
+                                plan_id,
+                                outcome="structural_fail",
+                                primary_issue=previous_plan_feedback,
+                                best_net_pnl=max(best_net_pnl_for_plan, 0.0),
+                            )
+                            break   # exit inner loop
+
+                        except DistributionFilterError as exc:
+                            # OOS dist filter → structural: exit inner loop
+                            logger.warning(
+                                "  OOS distribution filter rejected: %s", exc.reason
+                            )
+                            result.oos_verdict = "fail_oos"
+                            plan_outcome = "structural_fail"
+                            previous_plan_feedback = (
+                                f"IS passed but OOS entry never fired ({exc.reason}). "
+                                "Strategy is overfit. Design a more general strategy."
+                            )
+                            self._memory.update_plan_outcome(
+                                plan_id,
+                                outcome="structural_fail",
+                                primary_issue=previous_plan_feedback,
+                                best_net_pnl=max(best_net_pnl_for_plan, 0.0),
+                            )
+                            break   # exit inner loop
+
+                        except Exception as exc:
+                            logger.error("  OOS backtest failed: %s", exc)
+                            result.oos_verdict = "no_oos"
+                            result.best_run_id = run_id
+                            result.verdict = "pass"
+                            plan_outcome = "pass"
+                            self._memory.update_plan_outcome(
+                                plan_id, outcome="pass", best_net_pnl=best_net_pnl_for_plan
+                            )
+                            break
+                    else:
+                        result.best_run_id = run_id
+                        result.verdict = "pass"
+                        plan_outcome = "pass"
+                        logger.info("  Strategy passed (no OOS). Stopping.")
+                        self._memory.update_plan_outcome(
+                            plan_id, outcome="pass", best_net_pnl=best_net_pnl_for_plan
+                        )
+                        break
+
+                if result.verdict == "pass":
+                    break   # propagate out of plan loop too
+
+            # ── end of inner code loop ────────────────────────────────
+            if result.verdict == "pass":
+                break
+
+            # Update plan outcome if still no pass
+            if plan_outcome == "no_code_pass":
+                last_issue = (
+                    code_attempts[-1].get("primary_issue", "")
+                    if code_attempts else "no code attempts succeeded"
+                )
+                self._memory.update_plan_outcome(
+                    plan_id,
+                    outcome=plan_outcome,
+                    primary_issue=last_issue,
+                    best_net_pnl=max(best_net_pnl_for_plan, 0.0),
+                )
+                previous_plan_feedback = (
+                    f"All {max_code_attempts} code attempts failed for this spec. "
+                    f"Last issue: {last_issue}. "
+                    "Design a fundamentally different strategy spec."
+                )
 
         return result
 
@@ -510,12 +993,13 @@ class LoopRunner:
         start_date: str,
         end_date: str | None,
         cfg: dict[str, Any] | None,
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], list[Path]]:
         """코드 전략을 모든 심볼에 대해 백테스트하고 집계 결과를 반환한다."""
         summaries = []
+        run_dirs: list[Path] = []
         for sym in symbols:
             logger.info("  Backtesting code strategy, symbol=%s", sym)
-            s = self._run_backtest_code(
+            s, rd = self._run_backtest_code(
                 code=code,
                 strategy_name=strategy_name,
                 data_dir=data_dir,
@@ -525,7 +1009,8 @@ class LoopRunner:
                 cfg=cfg,
             )
             summaries.append(s)
-        return self._aggregate_summaries(summaries)
+            run_dirs.append(rd)
+        return self._aggregate_summaries(summaries), run_dirs
 
     def _run_backtest_code(
         self,
@@ -536,7 +1021,7 @@ class LoopRunner:
         start_date: str,
         end_date: str | None,
         cfg: dict[str, Any] | None,
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], Path]:
         """단일 심볼에 대해 코드 전략을 백테스트한다."""
         from evaluation_orchestration.layer7_validation import PipelineRunner
         from scripts.backtest import build_states_for_range, backtest_config_from_cfg
@@ -545,6 +1030,7 @@ class LoopRunner:
         bt_cfg = cfg.get("backtest", {})
         resample = bt_cfg.get("resample", "1s")
         lookback = bt_cfg.get("trade_lookback", 100)
+        tick_size = float(bt_cfg.get("tick_size", 1.0))
 
         states = build_states_for_range(
             data_dir=data_dir,
@@ -556,7 +1042,9 @@ class LoopRunner:
         )
 
         filter_args = self._distribution_filter_args(cfg)
-        filter_result = check_code_entry_frequency(code=code, states=states, **filter_args)
+        filter_result = check_code_entry_frequency(
+            code=code, states=states, tick_size=tick_size, **filter_args
+        )
         if not filter_result.passed:
             raise DistributionFilterError(filter_result.reason, filter_result.entry_frequency)
         logger.info("  Code distribution filter passed: entry_freq=%.4f", filter_result.entry_frequency)
@@ -568,7 +1056,7 @@ class LoopRunner:
             end_date=end_date,
         )
 
-        strategy = CodeStrategy(code=code, name=strategy_name)
+        strategy = CodeStrategy(code=code, name=strategy_name, tick_size=config.tick_size)
 
         runner = PipelineRunner(
             config=config,
@@ -577,4 +1065,31 @@ class LoopRunner:
             strategy=strategy,
         )
         bt_result = runner.run(states)
-        return bt_result.summary()
+        run_dir = Path(self._output_dir) / bt_result.run_id
+        return bt_result.summary(), run_dir
+
+
+def _write_strategy_info(
+    run_dir: Path,
+    *,
+    code: str,
+    feedback: dict,
+    strategy_text: str | None,
+    iteration: int,
+) -> None:
+    """strategy_info.json을 run_dir에 기록한다. 실패해도 warning만."""
+    import json as _json
+
+    info = {
+        "iteration": iteration,
+        "strategy_text": strategy_text,
+        "code": code,
+        "feedback": feedback,
+    }
+    try:
+        (run_dir / "strategy_info.json").write_text(
+            _json.dumps(info, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        logger.warning("Failed to write strategy_info.json to %s: %s", run_dir, exc)

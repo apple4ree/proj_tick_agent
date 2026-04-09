@@ -1,9 +1,12 @@
 """
 strategy_loop/openai_client.py
 --------------------------------
-얇은 OpenAI 클라이언트 래퍼.
+Live OpenAI API client wrapper.
 
-mode="mock" 이면 실제 API 호출 없이 미리 정의된 응답을 반환한다 (테스트용).
+Log files written on every call:
+  outputs/llm_logs/planner_*.json         — chat_json(context="planner")
+  outputs/llm_logs/feedback_*.json        — chat_json(context="feedback")
+  outputs/llm_logs/code_generation_*.json — chat_code()
 """
 from __future__ import annotations
 
@@ -16,47 +19,6 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 _LOG_DIR = Path(__file__).resolve().parents[2] / "outputs" / "llm_logs"
-
-_MOCK_FEEDBACK = {
-    "evidence": [
-        "Mock evidence: no real backtest analysis was performed.",
-    ],
-    "primary_issue": "Mock feedback — no real analysis performed.",
-    "issues": [],
-    "suggestions": [
-        "Try a higher order_imbalance threshold for fewer but higher-quality signals.",
-    ],
-}
-
-_MOCK_CODE = """\
-ORDER_IMBALANCE_THRESHOLD = 0.30
-OI_EMA_THRESHOLD = 0.20
-SPREAD_MAX_BPS = 50.0
-HOLDING_TICKS_EXIT = 20
-REVERSAL_THRESHOLD = -0.05
-
-def generate_signal(features, position):
-    holding = position["holding_ticks"]
-    in_pos = position["in_position"]
-
-    if in_pos:
-        if holding >= HOLDING_TICKS_EXIT:
-            return -1
-        if features.get("order_imbalance", 0.0) < REVERSAL_THRESHOLD:
-            return -1
-        return None
-
-    oi = features.get("order_imbalance", 0.0)
-    oi_ema = features.get("order_imbalance_ema", 0.0)
-    spread = features.get("spread_bps", 999.0)
-
-    if (oi > ORDER_IMBALANCE_THRESHOLD
-            and oi_ema > OI_EMA_THRESHOLD
-            and spread < SPREAD_MAX_BPS):
-        return 1
-
-    return None
-"""
 
 
 def _strip_code_fence(s: str) -> str:
@@ -73,7 +35,7 @@ def _strip_code_fence(s: str) -> str:
 
 
 def _save_llm_log(context: str, messages: list[dict], raw: str) -> None:
-    """raw LLM 응답을 outputs/llm_logs/ 에 저장한다."""
+    """raw LLM 응답을 outputs/llm_logs/{context}_*.json 에 저장한다."""
     import datetime
     try:
         _LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -89,25 +51,23 @@ def _save_llm_log(context: str, messages: list[dict], raw: str) -> None:
 
 
 class OpenAIClient:
-    """Thin wrapper around OpenAI chat completions."""
+    """Thin wrapper around the OpenAI chat completions API (live calls only).
 
-    def __init__(self, model: str = "gpt-4o-mini", mode: str = "live") -> None:
+    Inject a fake/stub client for tests — see tests/fakes/fake_llm_client.py.
+    """
+
+    def __init__(self, model: str = "gpt-4o-mini") -> None:
         self.model = model
-        self.mode = mode
-        if mode == "live":
-            try:
-                import openai
-                self._client = openai.OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-            except ImportError as e:
-                raise ImportError("openai package required for live mode: pip install openai") from e
+        try:
+            import openai
+            self._client = openai.OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+        except ImportError as e:
+            raise ImportError(
+                "openai package required: pip install openai"
+            ) from e
 
     def chat(self, messages: list[dict], response_format: str = "json_object") -> str:
-        """Send messages and return the assistant content string."""
-        if self.mode == "mock":
-            if response_format == "text":
-                return _MOCK_CODE
-            return json.dumps(_MOCK_FEEDBACK)
-
+        """Send messages to OpenAI and return the assistant content string."""
         resp = self._client.chat.completions.create(
             model=self.model,
             messages=messages,
@@ -117,13 +77,19 @@ class OpenAIClient:
         return resp.choices[0].message.content
 
     def chat_code(self, messages: list[dict]) -> str:
-        """코드 생성 전용: 텍스트 모드로 응답을 받고 코드 펜스를 제거한다."""
+        """Code generation: text mode response with code fence stripped."""
         raw = self.chat(messages, response_format="text")
         _save_llm_log("code_generation", messages, raw)
         return _strip_code_fence(raw)
 
-    def chat_json(self, messages: list[dict]) -> Any:
-        """Send messages and parse the response as JSON."""
+    def chat_json(self, messages: list[dict], context: str = "feedback") -> Any:
+        """Send messages and parse the JSON response.
+
+        Args:
+            messages: Chat messages list.
+            context: Log file prefix — "planner" or "feedback".
+                     Controls the saved log filename.
+        """
         raw = self.chat(messages, response_format="json_object")
-        _save_llm_log("feedback", messages, raw)
+        _save_llm_log(context, messages, raw)
         return json.loads(raw)
